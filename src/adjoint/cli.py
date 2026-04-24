@@ -154,10 +154,18 @@ def _daemon_status() -> tuple[bool, str]:
         return False, f"socket present but not responsive ({exc})"
 
 
-# Hooks we currently register. PreToolUse / PostToolUse / UserPromptSubmit
-# are deliberately NOT in this set until M2 ships real handlers — registering
-# a no-op hook costs a Python process spawn per tool invocation.
-EXPECTED_HOOK_EVENTS: frozenset[str] = frozenset({"SessionStart", "SessionEnd", "PreCompact"})
+# Hooks we register. M0/M1: SessionStart, SessionEnd, PreCompact.
+# M2 adds PreToolUse (policy), PostToolUse (audit), UserPromptSubmit (enrich).
+EXPECTED_HOOK_EVENTS: frozenset[str] = frozenset(
+    {
+        "SessionStart",
+        "SessionEnd",
+        "PreCompact",
+        "PreToolUse",
+        "PostToolUse",
+        "UserPromptSubmit",
+    }
+)
 
 
 def _hooks_installed(scope: str, project_path: Path | None) -> tuple[int, int]:
@@ -410,11 +418,124 @@ def run_logs(
 
 @events_app.command("tail")
 def events_tail(
-    n: int = typer.Option(20, "-n"),
-    follow: bool = typer.Option(False, "-f", "--follow"),
-    type_: str | None = typer.Option(None, "--type"),
+    n: int = typer.Option(20, "-n", help="Number of most-recent rows to show."),
+    follow: bool = typer.Option(
+        False, "-f", "--follow", help="Poll for new rows (Ctrl-C to stop)."
+    ),
+    type_: str | None = typer.Option(
+        None,
+        "--type",
+        help="Filter by event_type. Trailing `.` matches prefix (e.g. `hook.`).",
+    ),
 ) -> None:
-    _not_yet("M2")
+    """Print recent rows from ~/.adjoint/events.db."""
+    import sqlite3
+    import time
+
+    from .store.sqlite import connect
+
+    if not user_paths().events_db.is_file():
+        err_console.print(
+            "[yellow]No events.db yet — run [bold]adjoint install[/bold] first.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    clause, args = _events_filter_clause(type_)
+    head_sql = _events_query(clause, follow=False)
+    try:
+        conn = connect()
+    except sqlite3.OperationalError as exc:
+        err_console.print(f"[red]failed to open events.db:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        rows = list(conn.execute(head_sql, (*args, max(n, 1))))
+        rows.reverse()
+        _render_events_table(rows)
+
+        if not follow:
+            return
+
+        last_id = rows[-1]["id"] if rows else 0
+        follow_sql = _events_query(clause, follow=True)
+        try:
+            while True:
+                time.sleep(0.5)
+                for row in conn.execute(follow_sql, (last_id, *args)):
+                    _render_events_line(row)
+                    last_id = row["id"]
+        except KeyboardInterrupt:
+            return
+    finally:
+        conn.close()
+
+
+def _events_filter_clause(type_: str | None) -> tuple[str, tuple[str, ...]]:
+    if not type_:
+        return "", ()
+    if type_.endswith("."):
+        return "event_type LIKE ?", (type_ + "%",)
+    return "event_type = ?", (type_,)
+
+
+_EVENTS_COLUMNS = "id, ts, session_id, event_type, payload_json"
+
+
+def _events_query(clause: str, *, follow: bool) -> str:
+    """Build the SELECT for ``events tail``.
+
+    ``clause`` comes from ``_events_filter_clause`` — one of two hard-coded
+    alternatives, never user-supplied text. The user's filter value is always
+    bound through the ``?`` placeholder by the caller.
+    """
+    if follow:
+        where = "WHERE id > ?" + (f" AND {clause}" if clause else "")
+        order = "ORDER BY id ASC"
+    else:
+        where = f"WHERE {clause}" if clause else ""
+        order = "ORDER BY id DESC LIMIT ?"
+    # nosec B608 — fragments are fixed; the only user value is parameter-bound.
+    return f"SELECT {_EVENTS_COLUMNS} FROM events {where} {order}".strip()  # nosec B608
+
+
+def _summarize_payload(payload_json: str | None) -> str:
+    if not payload_json:
+        return "{}"
+    try:
+        obj = json.loads(payload_json)
+    except (TypeError, ValueError):
+        return payload_json[:80]
+    if isinstance(obj, dict):
+        parts = [f"{k}={json.dumps(v, default=str)[:40]}" for k, v in list(obj.items())[:4]]
+        return "{" + ", ".join(parts) + "}"
+    return str(obj)[:80]
+
+
+def _render_events_table(rows: list) -> None:
+    if not rows:
+        console.print("[dim]no events[/dim]")
+        return
+    t = Table(show_header=True, box=None)
+    t.add_column("ts", style="dim")
+    t.add_column("event_type")
+    t.add_column("session", style="dim")
+    t.add_column("payload", overflow="fold")
+    for row in rows:
+        t.add_row(
+            str(row["ts"]),
+            str(row["event_type"]),
+            (row["session_id"] or "-")[:8],
+            _summarize_payload(row["payload_json"]),
+        )
+    console.print(t)
+
+
+def _render_events_line(row) -> None:
+    console.print(
+        f"[dim]{row['ts']}[/dim] {row['event_type']} "
+        f"[dim]{(row['session_id'] or '-')[:8]}[/dim] "
+        f"{_summarize_payload(row['payload_json'])}"
+    )
 
 
 @app.command()

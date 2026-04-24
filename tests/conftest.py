@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,30 @@ def _no_recursion_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     # Tests should never inherit an adjoint recursion marker from the parent env.
     monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
     assert os.environ.get("CLAUDE_INVOKED_BY") is None
+
+
+@pytest.fixture
+def run_hook_bin(
+    adjoint_home: Path,
+) -> Callable[[str, str], subprocess.CompletedProcess]:
+    """Invoke an installed ``adjoint-hook-*`` console script with stdin JSON.
+
+    Locates the binary next to the active interpreter (setuptools entry points)
+    and runs it with a minimal env that pins ``ADJOINT_HOME`` to the test home.
+    """
+    bin_dir = Path(sys.executable).parent
+
+    def _run(binary: str, stdin: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(bin_dir / binary)],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env={"ADJOINT_HOME": str(adjoint_home), "PATH": "/usr/bin:/bin"},
+            timeout=10,
+        )
+
+    return _run
 
 
 def write_article(

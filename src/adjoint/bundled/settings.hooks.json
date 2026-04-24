@@ -20,6 +20,27 @@
           {"type": "command", "command": "adjoint-hook-pre-compact", "timeout": 15}
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {"type": "command", "command": "adjoint-hook-pre-tool-use", "timeout": 3}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {"type": "command", "command": "adjoint-hook-post-tool-use", "timeout": 2}
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "adjoint-hook-user-prompt", "timeout": 2}
+        ]
+      }
     ]
   }
 }

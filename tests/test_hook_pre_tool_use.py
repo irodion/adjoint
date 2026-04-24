@@ -1,0 +1,186 @@
+"""End-to-end subprocess tests for the PreToolUse hook.
+
+Exercises the real ``adjoint-hook-pre-tool-use`` binary, dropping policy files
+into ``$ADJOINT_HOME/policies/enabled/`` and asserting on the JSON emitted on
+stdout.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from textwrap import dedent
+
+HOOK_BIN = "adjoint-hook-pre-tool-use"
+
+
+def _write(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dedent(body).lstrip(), encoding="utf-8")
+
+
+def _payload(project_dir: Path, tool_name: str, tool_input: dict) -> str:
+    return json.dumps(
+        {
+            "session_id": "sess-1",
+            "transcript_path": str(project_dir / "nonexistent.jsonl"),
+            "cwd": str(project_dir),
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }
+    )
+
+
+def test_no_policies_dir_is_passthrough(project_dir: Path, run_hook_bin) -> None:
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    assert cp.stdout == ""
+
+
+def test_deny_policy_emits_permission_deny(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    _write(
+        adjoint_home / "policies" / "enabled" / "deny_all.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="test deny")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    assert hso["permissionDecisionReason"] == "test deny"
+
+
+def test_ask_policy_emits_permission_ask(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    _write(
+        adjoint_home / "policies" / "enabled" / "ask_all.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="ask", reason="confirm?")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "confirm?"
+
+
+def test_allow_policy_is_passthrough(adjoint_home: Path, project_dir: Path, run_hook_bin) -> None:
+    _write(
+        adjoint_home / "policies" / "enabled" / "allow_all.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="allow")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    assert cp.stdout == ""
+
+
+def test_raising_policy_fails_open(adjoint_home: Path, project_dir: Path, run_hook_bin) -> None:
+    _write(
+        adjoint_home / "policies" / "enabled" / "boom.py",
+        """
+        def decide(ctx):
+            raise RuntimeError("boom")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    assert cp.stdout == ""
+
+
+def test_deny_beats_allow_when_combined(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    enabled = adjoint_home / "policies" / "enabled"
+    _write(
+        enabled / "a_allow.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="allow")
+        """,
+    )
+    _write(
+        enabled / "b_deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="composed")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_configured_policies_dir_is_honored(
+    tmp_path: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """``cfg.policies.dir`` pointing at a custom path must be respected."""
+    custom = tmp_path / "my-policies"
+    _write(
+        custom / "deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="from custom dir")
+        """,
+    )
+    (project_dir / ".adjoint").mkdir()
+    (project_dir / ".adjoint" / "config.toml").write_text(
+        f'[policies]\ndir = "{custom}"\n',
+        encoding="utf-8",
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "from custom dir"
+
+
+def test_bundled_no_writes_outside_repo(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """End-to-end smoke of the shipped bundled policy."""
+    from adjoint.install import apply_install, build_install_plan
+
+    plan, merged = build_install_plan("project", project_dir)
+    apply_install(plan, merged)
+
+    disabled = adjoint_home / "policies" / "disabled" / "no_writes_outside_repo.py"
+    assert disabled.is_file(), "bundled policy should be copied by install"
+    enabled = adjoint_home / "policies" / "enabled"
+    enabled.mkdir(parents=True, exist_ok=True)
+    (enabled / "no_writes_outside_repo.py").symlink_to(disabled)
+
+    outside = project_dir.parent / "outside.txt"
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": str(outside)}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    inside = project_dir / "inside.txt"
+    cp2 = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": str(inside)}))
+    assert cp2.returncode == 0
+    assert cp2.stdout == ""
+
+    # Relative path: must be anchored against ctx.cwd, not the hook's own cwd.
+    cp3 = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": "inside.txt"}))
+    assert cp3.returncode == 0
+    assert cp3.stdout == "", "relative path inside repo should be allowed"
