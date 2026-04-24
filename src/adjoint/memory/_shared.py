@@ -7,9 +7,10 @@ means the KB's on-disk shape has exactly one Python representation.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 Kind = Literal["concept", "connection", "qa"]
 KINDS: tuple[Kind, ...] = ("concept", "connection", "qa")
@@ -39,6 +40,46 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return fm, body
 
 
+def parse_frontmatter_list(text: str, key: str) -> list[str]:
+    """Extract a block-style YAML list from the frontmatter.
+
+    Handles the shape ``_render_article`` emits::
+
+        sources:
+          - daily/2026-04-24.md
+          - daily/2026-04-25.md
+
+    Returns the list of item values (stripped). ``[]`` if the key is absent
+    or has no list items.
+    """
+    m = FRONTMATTER_RE.match(text)
+    if not m:
+        return []
+    out: list[str] = []
+    in_block = False
+    key_prefix = f"{key}:"
+    for line in m.group(1).splitlines():
+        stripped = line.strip()
+        if stripped.startswith(key_prefix):
+            # ``key:`` on its own line opens a block list; ``key: [a, b]``
+            # would be a flow list (not emitted by compile, but handle it).
+            rhs = stripped[len(key_prefix) :].strip()
+            if rhs.startswith("["):
+                inner = rhs.strip("[]")
+                return [s.strip().strip("'\"") for s in inner.split(",") if s.strip()]
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith(("  -", "\t-")):
+                item = line.lstrip().lstrip("-").strip()
+                if item:
+                    out.append(item)
+            elif stripped and not line.startswith((" ", "\t")):
+                # Next top-level key — block ends.
+                break
+    return out
+
+
 def strip_backlinks(body: str) -> str:
     """Drop any trailing ``## Backlinks`` section — regenerated deterministically."""
     return _BACKLINKS_RE.sub("", body.strip()).strip()
@@ -66,3 +107,19 @@ def first_paragraph(body: str) -> str:
             continue
         return " ".join(stripped.split())
     return ""
+
+
+def extract_json_array(text: str) -> list[Any]:
+    """Salvage a JSON array from LLM output, tolerating code fences and prose."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\n", "", stripped)
+        stripped = re.sub(r"\n```\s*$", "", stripped)
+    m = re.search(r"\[.*\]", stripped, re.DOTALL)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []

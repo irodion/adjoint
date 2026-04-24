@@ -9,7 +9,6 @@ alongside the rest of the KB in Obsidian.
 
 from __future__ import annotations
 
-import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -19,7 +18,13 @@ from pathlib import Path
 from ..config import Config, load_config
 from ..log import RecursionTag, get_logger, log_event
 from ..paths import ProjectPaths, UserPaths, user_paths
-from ._shared import first_paragraph, parse_frontmatter, strip_backlinks, wikilink_targets
+from ._shared import (
+    extract_json_array,
+    first_paragraph,
+    parse_frontmatter,
+    strip_backlinks,
+    wikilink_targets,
+)
 from .agent import AgentClient, AgentRequest, complete_sync, default_client
 
 
@@ -249,16 +254,16 @@ def _llm_lint(
         model=cfg.model_for("claude"),
         allowed_tools=[],
         max_turns=1,
+        # Reuse the memory-query cap as a per-call ceiling. Two LLM lint
+        # checks × this cap is the worst-case lint spend; the user controls
+        # it via ``memory.query_max_cost_usd`` (conservative default $0.10).
+        # Chunking large KBs across multiple calls is a follow-up; this at
+        # least stops a single runaway call from burning the budget.
+        max_budget_usd=cfg.memory.query_max_cost_usd,
         recursion_tag=recursion_tag,
     )
     resp = complete_sync(agent, req)
-    raw = resp.text.strip()
-    m = re.search(r"\[.*\]", raw, re.DOTALL)
-    try:
-        data = json.loads(m.group(0)) if m else []
-    except json.JSONDecodeError:
-        data = []
-    return (data if isinstance(data, list) else []), (resp.cost_usd or 0.0)
+    return extract_json_array(resp.text), (resp.cost_usd or 0.0)
 
 
 def _check_contradictions_and_duplicates(
@@ -349,7 +354,7 @@ def lint(
             articles, report, agent=client or default_client(), cfg=cfg
         )
 
-    write_report(pp, report)
+    write_report(pp, report, cheap=cheap)
     log_event(
         get_logger("memory.lint"),
         "lint.ok",
@@ -361,17 +366,23 @@ def lint(
     return report
 
 
-def write_report(pp: ProjectPaths, report: LintReport) -> Path:
+def write_report(pp: ProjectPaths, report: LintReport, *, cheap: bool = False) -> Path:
     pp.knowledge_dir.mkdir(parents=True, exist_ok=True)
     path = pp.knowledge_dir / ".lint-report.md"
+    if report.cost_usd:
+        cost_line = f"- LLM cost: ${report.cost_usd:.4f}"
+    elif cheap:
+        cost_line = "- LLM cost: $0.00 (cheap mode)"
+    else:
+        # Non-cheap run that simply found nothing to flag — $0.00 is a real
+        # result, not a skipped check.
+        cost_line = "- LLM cost: $0.00"
     lines = [
         "# Knowledge Base — Lint Report",
         "",
         f"- Articles scanned: **{report.articles_scanned}**",
         f"- Issues: **{len(report.issues)}**",
-        f"- LLM cost: ${report.cost_usd:.4f}"
-        if report.cost_usd
-        else "- LLM cost: $0.00 (cheap mode)",
+        cost_line,
         "",
     ]
     by_check = report.by_check()

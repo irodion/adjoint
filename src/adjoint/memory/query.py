@@ -67,10 +67,18 @@ def query_knowledge(
     if pp.knowledge_index.is_file():
         # Cap to the same budget the SessionStart injection uses — guards the
         # model's context even if the on-disk index was hand-edited to be big.
+        # Keep the HEAD (Action Items, Recently Updated) and back off to the
+        # last newline inside the budget to avoid a mid-line break — matches
+        # the SessionStart hook's truncation so both paths surface the same
+        # high-value sections.
         encoded = pp.knowledge_index.read_bytes()
         cap = max(1024, cfg.memory.index_max_bytes)
         if len(encoded) > cap:
-            encoded = encoded[-cap:]
+            head = encoded[:cap]
+            newline = head.rfind(b"\n")
+            if newline > 0:
+                head = head[: newline + 1]
+            encoded = head
         index_text = encoded.decode("utf-8", errors="ignore")
     else:
         index_text = "_(knowledge/index.md not yet generated — run `adjoint memory compile` first)_"
@@ -95,11 +103,12 @@ def query_knowledge(
     )
     resp = complete_sync(agent, req)
 
-    # Don't log the raw question — it can contain secrets, user PII, or
-    # confidential context. Apply the configured redaction patterns and log a
-    # hash alongside the length so ops can correlate without leaking content.
-    redactor = redactor_from_config(cfg.memory.redact_patterns)
-    redacted = redactor.sanitize(question)
+    # Don't log raw user text. Even after running the configured redaction
+    # patterns, anything not matched by a pattern is still verbatim user
+    # content — that's fine for operator correlation but NOT for a log line.
+    # We keep a short hash + length so on-call can correlate events without
+    # leaking the question. Redacted text is only emitted via the debug
+    # channel so operators opting into `level=DEBUG` can still diagnose.
     question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
     logger = get_logger("memory.query")
     log_event(
@@ -107,10 +116,17 @@ def query_knowledge(
         "query.ok",
         question_hash=question_hash,
         question_len=len(question),
-        question_redacted=redacted[:200],
         cost_usd=resp.cost_usd,
         duration_ms=resp.duration_ms,
     )
+    if logger.isEnabledFor(10):  # DEBUG
+        redactor = redactor_from_config(cfg.memory.redact_patterns)
+        log_event(
+            logger,
+            "query.debug.sample",
+            question_hash=question_hash,
+            question_redacted=redactor.sanitize(question)[:200],
+        )
     return QueryResult(
         answer=resp.text.strip(),
         cost_usd=resp.cost_usd,

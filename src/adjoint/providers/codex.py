@@ -6,7 +6,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..log import get_logger
 from .base import Provider, ProviderNotFoundError, ProviderResult, spawn, which
+
+_log = get_logger("providers.codex")
 
 
 class CodexProvider:
@@ -39,6 +42,15 @@ class CodexProvider:
         bin_path = self.binary()
         if not bin_path:
             raise ProviderNotFoundError("codex CLI not found on PATH")
+
+        # ``codex exec`` has no direct ``--add-dir`` equivalent, so we accept
+        # ``context_files`` for Provider-protocol parity but can't forward
+        # them. Warn rather than silently drop so callers notice the gap.
+        if context_files:
+            _log.warning(
+                "codex provider ignoring %d context_files (unsupported by `codex exec`)",
+                len(context_files),
+            )
 
         # Flags before the positional prompt — some arg parsers (argparse
         # among them) stop consuming flags once a positional appears.

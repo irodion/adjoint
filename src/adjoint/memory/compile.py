@@ -27,7 +27,6 @@ with Write permissions.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from collections import defaultdict
@@ -43,7 +42,9 @@ from ..paths import ProjectPaths, UserPaths, user_paths
 from ._shared import (
     KINDS,
     Kind,
+    extract_json_array,
     parse_frontmatter,
+    parse_frontmatter_list,
     strip_backlinks,
     wikilink_targets,
 )
@@ -143,24 +144,6 @@ def _slugify(raw: str) -> str:
     return _SLUG_RE.sub("-", raw.lower()).strip("-") or "untitled"
 
 
-def _extract_json_array(text: str) -> list[Any]:
-    """Salvage a JSON array from LLM output, tolerating code fences + prose."""
-    stripped = text.strip()
-    # Strip trailing/leading fences if present.
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z]*\n", "", stripped)
-        stripped = re.sub(r"\n```\s*$", "", stripped)
-    # Find the first [...] blob.
-    m = re.search(r"\[.*\]", stripped, re.DOTALL)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-        return data if isinstance(data, list) else []
-    except json.JSONDecodeError:
-        return []
-
-
 def _parse_candidates(raw: list[Any], source_daily: str) -> list[Candidate]:
     out: list[Candidate] = []
     for d in raw:
@@ -258,10 +241,13 @@ def _ensure_git(knowledge_dir: Path) -> None:
     if (knowledge_dir / ".git").exists():
         return
     _run_git(knowledge_dir, "init", "-q")
-    # User-level git config is fine; we just need a committer identity.
-    name = _run_git(knowledge_dir, "config", "user.name").stdout.strip()
-    if not name:
+    # User-level git config is fine; we just need a committer identity. Check
+    # ``user.name`` and ``user.email`` INDEPENDENTLY — a user with a global
+    # ``user.name`` but no ``user.email`` would otherwise hit a commit failure
+    # when git demanded the address.
+    if not _run_git(knowledge_dir, "config", "user.name").stdout.strip():
         _run_git(knowledge_dir, "config", "user.name", "adjoint")
+    if not _run_git(knowledge_dir, "config", "user.email").stdout.strip():
         _run_git(knowledge_dir, "config", "user.email", "adjoint@localhost")
 
 
@@ -298,7 +284,7 @@ def _extract_candidates(
         recursion_tag="adjoint_compile",
     )
     resp = complete_sync(agent, req)
-    raw = _extract_json_array(resp.text)
+    raw = extract_json_array(resp.text)
     return _parse_candidates(raw, source_rel), (resp.cost_usd or 0.0)
 
 
@@ -542,7 +528,14 @@ def compile_project(
         kind_val: Kind = kind_raw if kind_raw in KINDS else "concept"
         tags_val = re.findall(r"[a-z0-9_-]+", fm.get("tags", "")) or []
         entry = state.articles.get(_relpath(p, pp.root))
-        sources_val = entry.sources if entry else ["daily/unknown.md"]
+        if entry:
+            sources_val = entry.sources
+        else:
+            # Untracked article (manually created, pre-existing, or orphan of a
+            # lost state file). Recover the sources from on-disk frontmatter so
+            # pass 2 doesn't clobber them with a bogus "daily/unknown.md".
+            on_disk_sources = parse_frontmatter_list(current, "sources")
+            sources_val = on_disk_sources or ["daily/unknown.md"]
         rendered = _render_article(
             title=fm.get("title", p.stem),
             kind=kind_val,

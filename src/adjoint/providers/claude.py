@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -21,7 +22,7 @@ class ClaudeProvider:
             return None
         try:
             cp = spawn([bin_path, "--version"], timeout_seconds=5.0)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return None
         if cp.returncode != 0:
             return None

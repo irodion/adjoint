@@ -13,9 +13,8 @@ no runtime race between migration and first hook insert.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 from ..paths import migrations_dir, user_paths
@@ -42,31 +41,32 @@ def connect() -> sqlite3.Connection:
     return _connect(user_paths().events_db)
 
 
-@contextmanager
-def transaction(conn: sqlite3.Connection | None = None) -> Iterator[sqlite3.Connection]:
-    """Context manager that commits on success, rolls back on exception."""
-    owned = conn is None
-    c = conn or connect()
-    try:
-        c.execute("BEGIN")
-        yield c
-        c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
-    finally:
-        if owned:
-            c.close()
+def _bootstrap_schema(conn: sqlite3.Connection) -> None:
+    """Create the ``schema_migrations`` bookkeeping table if it's missing."""
+    conn.executescript(_BOOTSTRAP_SQL)
 
 
 def _applied_migrations(conn: sqlite3.Connection) -> set[str]:
-    conn.executescript(_BOOTSTRAP_SQL)
+    """Read-only: returns the set of migration names already recorded."""
     rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
     return {r["name"] for r in rows}
 
 
 def _discover_migrations() -> list[Path]:
     return sorted(migrations_dir().glob("*.sql"))
+
+
+def _safe_rollback(conn: sqlite3.Connection) -> None:
+    """Issue ROLLBACK iff a transaction is open; swallow OperationalError.
+
+    ``c.execute('ROLLBACK')`` outside a transaction raises ``OperationalError``
+    — we want to preserve the ORIGINAL exception the caller's ``try`` caught,
+    not trade it for a noisier rollback error.
+    """
+    if not conn.in_transaction:
+        return
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("ROLLBACK")
 
 
 def run_migrations(conn: sqlite3.Connection | None = None) -> list[str]:
@@ -81,6 +81,7 @@ def run_migrations(conn: sqlite3.Connection | None = None) -> list[str]:
     c = conn or connect()
     applied_now: list[str] = []
     try:
+        _bootstrap_schema(c)
         already = _applied_migrations(c)
         for path in _discover_migrations():
             if path.name in already:
@@ -100,7 +101,11 @@ def run_migrations(conn: sqlite3.Connection | None = None) -> list[str]:
                 f"INSERT INTO schema_migrations(name) VALUES ('{safe_name}');\n"  # nosec B608
                 "COMMIT;"
             )
-            c.executescript(combined)
+            try:
+                c.executescript(combined)
+            except Exception:
+                _safe_rollback(c)
+                raise
             applied_now.append(path.name)
     finally:
         if owned:
