@@ -1,0 +1,138 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adjoint"
+version = "0.1.0"
+description = "A cooperative companion for Claude Code: hooks, MCP primitives, and automated memory extraction."
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.12"
+authors = [{ name = "Rodion Izotov" }]
+keywords = ["claude-code", "mcp", "hooks", "memory", "knowledge-base"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+]
+
+[project.optional-dependencies]
+memory = [
+  "claude-agent-sdk>=0.1",
+]
+mcp = [
+  "mcp>=1.2",
+]
+daemon = [
+  "fastapi>=0.110",
+  "uvicorn>=0.30",
+  "apscheduler>=3.10",
+  "msgpack>=1.0",
+]
+all = [
+  "adjoint[memory,mcp,daemon]",
+]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "bandit[toml]>=1.7.9",
+  "pre-commit>=3.7",
+]
+
+[project.scripts]
+adjoint = "adjoint.cli:app"
+adjoint-mcp = "adjoint.mcp.server:main"
+adjoint-hook-session-start = "adjoint.hooks.session_start:main"
+adjoint-hook-session-end = "adjoint.hooks.session_end:main"
+adjoint-hook-pre-compact = "adjoint.hooks.pre_compact:main"
+adjoint-hook-pre-tool-use = "adjoint.hooks.pre_tool_use:main"
+adjoint-hook-post-tool-use = "adjoint.hooks.post_tool_use:main"
+adjoint-hook-user-prompt = "adjoint.hooks.user_prompt:main"
+
+[project.urls]
+Homepage = "https://github.com/irodion/adjoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adjoint"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/adjoint/bundled" = "adjoint/bundled"
+"src/adjoint/store/migrations" = "adjoint/store/migrations"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/adjoint",
+  "LICENSE",
+  "README.md",
+  "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008 is the standard typer pattern (typer.Option() / typer.Argument() in defaults).
+ignore = ["E501", "B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = false
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/adjoint"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+disallow_untyped_decorators = false
+# Third-party libs without type stubs:
+ignore_missing_imports = true
+# Be strict where it's cheap, lax where stubs are bad.
+disable_error_code = ["no-untyped-def", "import-untyped"]
+
+[[tool.mypy.overrides]]
+module = ["adjoint.cli", "adjoint.install"]
+# Typer + Rich + Pydantic constructors trigger a lot of benign complaints.
+warn_unreachable = false
+
+[tool.bandit]
+# Bandit scans our source but not our tests (which use tmpdir + subprocess
+# intentionally in ways that would trip B-checks).
+targets = ["src"]
+exclude_dirs = ["tests", ".venv", "build", "dist"]
+# We skip three bandit rules repo-wide because they fire on *every* subprocess
+# call in a codebase that deliberately uses subprocess (providers, hooks, git).
+# Security of our subprocess usage is actually verified by ``test_security.py``
+# which asserts zero ``shell=True`` call sites via AST. B607 is skipped because
+# we rely on PATH to locate ``git`` / ``claude`` / ``codex`` — absolute paths
+# would defeat the "delegate to installed CLIs" principle.
+skips = ["B404", "B603", "B606", "B607"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "e2e: end-to-end smoke tests (slower; may spawn subprocesses)",
+]

@@ -1,0 +1,61 @@
+# Run on every commit.  Install once with: `uv run pre-commit install`.
+#
+# We use ``local`` hooks that invoke the tools from ``.venv`` so that CI,
+# commit-time checks, and developer-run checks all use exactly the same
+# versions (the ones pinned in pyproject.toml's [dev] extra).
+
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: meta
+    hooks:
+      - id: check-hooks-apply
+      - id: check-useless-excludes
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (lint)
+        entry: .venv/bin/ruff
+        args: ["check", "--fix"]
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: .venv/bin/ruff
+        args: ["format"]
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: true
+
+      - id: mypy
+        name: mypy (type check)
+        entry: .venv/bin/mypy
+        language: system
+        types: [python]
+        # mypy needs the whole package to resolve imports correctly; ignore
+        # per-file filenames and scan the configured ``files`` instead.
+        pass_filenames: false
+        args: []
+
+      - id: bandit
+        name: bandit (security)
+        entry: .venv/bin/bandit
+        args: ["-c", "pyproject.toml", "-r", "src"]
+        language: system
+        types: [python]
+        pass_filenames: false
