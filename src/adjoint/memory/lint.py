@@ -192,8 +192,14 @@ def _check_missing_backlinks(articles: list[_LoadedArticle], report: LintReport)
     """If A [[B]], then B's ## Backlinks should list A."""
     outgoing = {art.path.stem: wikilink_targets(art.stripped_body) for art in articles}
     declared: dict[str, set[str]] = {}
+    # Stop the Backlinks capture at the next level-2 heading (or EOF) so a
+    # trailing section after Backlinks doesn't get absorbed into the scan.
+    backlinks_re = re.compile(
+        r"^##\s+Backlinks\s*\n(.*?)(?=^##\s|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
     for art in articles:
-        m = re.search(r"^##\s+Backlinks\s*\n(.*)$", art.text, re.MULTILINE | re.DOTALL)
+        m = backlinks_re.search(art.text)
         declared[art.path.stem] = wikilink_targets(m.group(1) if m else "")
 
     for src, targets in outgoing.items():

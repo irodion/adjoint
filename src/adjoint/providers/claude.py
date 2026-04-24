@@ -55,10 +55,18 @@ class ClaudeProvider:
         cost_usd: float | None = None
         try:
             payload = json.loads(cp.stdout) if cp.stdout.strip() else {}
-            response = payload.get("result") or payload.get("response") or cp.stdout
-            cost_usd = payload.get("total_cost_usd") or payload.get("cost_usd")
         except json.JSONDecodeError:
-            pass
+            payload = {}
+        # Explicit None checks — "result": "" and "total_cost_usd": 0.0 are
+        # valid values that ``or`` would incorrectly discard.
+        if payload.get("result") is not None:
+            response = payload["result"]
+        elif payload.get("response") is not None:
+            response = payload["response"]
+        if payload.get("total_cost_usd") is not None:
+            cost_usd = payload["total_cost_usd"]
+        elif payload.get("cost_usd") is not None:
+            cost_usd = payload["cost_usd"]
 
         return ProviderResult(
             provider=self.name,

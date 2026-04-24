@@ -440,9 +440,15 @@ def compile_project(
             existing_fm, existing_body = parse_frontmatter(full.read_text(encoding="utf-8"))
 
         # Kind, title, tags: prefer the freshest candidate (last in list), else
-        # fall back to existing frontmatter.
+        # fall back to existing frontmatter. Validate against KINDS so a junk
+        # value in on-disk frontmatter can't poison the rewrite (pass 2 already
+        # does this — parity here prevents cross-pass drift).
         canonical = cands[-1] if cands else None
-        kind: Kind = canonical.kind if canonical else existing_fm.get("kind", "concept")  # type: ignore[assignment]
+        if canonical is not None:
+            kind: Kind = canonical.kind
+        else:
+            existing_kind = existing_fm.get("kind", "concept")
+            kind = existing_kind if existing_kind in KINDS else "concept"
         title = canonical.title if canonical else existing_fm.get("title", full.stem)
         tags: set[str] = set()
         for c in cands:

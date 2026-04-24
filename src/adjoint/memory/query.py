@@ -14,6 +14,7 @@ real files the user can open).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from ..config import Config, load_config
 from ..log import get_logger, log_event
 from ..paths import UserPaths, user_paths
 from .agent import AgentClient, AgentRequest, complete_sync, default_client
+from .redact import from_config as redactor_from_config
 
 QUERY_SYSTEM_PROMPT = """\
 You answer questions using a local Obsidian-style markdown knowledge base.
@@ -62,11 +64,16 @@ def query_knowledge(
     pp = up.project(project_path)
     pp.ensure()
 
-    index_text = (
-        pp.knowledge_index.read_text(encoding="utf-8")
-        if pp.knowledge_index.is_file()
-        else "_(knowledge/index.md not yet generated — run `adjoint memory compile` first)_"
-    )
+    if pp.knowledge_index.is_file():
+        # Cap to the same budget the SessionStart injection uses — guards the
+        # model's context even if the on-disk index was hand-edited to be big.
+        encoded = pp.knowledge_index.read_bytes()
+        cap = max(1024, cfg.memory.index_max_bytes)
+        if len(encoded) > cap:
+            encoded = encoded[-cap:]
+        index_text = encoded.decode("utf-8", errors="ignore")
+    else:
+        index_text = "_(knowledge/index.md not yet generated — run `adjoint memory compile` first)_"
 
     user_prompt = (
         f"Question:\n{question}\n\n"
@@ -88,11 +95,19 @@ def query_knowledge(
     )
     resp = complete_sync(agent, req)
 
+    # Don't log the raw question — it can contain secrets, user PII, or
+    # confidential context. Apply the configured redaction patterns and log a
+    # hash alongside the length so ops can correlate without leaking content.
+    redactor = redactor_from_config(cfg.memory.redact_patterns)
+    redacted = redactor.sanitize(question)
+    question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
     logger = get_logger("memory.query")
     log_event(
         logger,
         "query.ok",
-        question=question[:200],
+        question_hash=question_hash,
+        question_len=len(question),
+        question_redacted=redacted[:200],
         cost_usd=resp.cost_usd,
         duration_ms=resp.duration_ms,
     )

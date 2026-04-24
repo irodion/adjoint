@@ -70,7 +70,13 @@ def _discover_migrations() -> list[Path]:
 
 
 def run_migrations(conn: sqlite3.Connection | None = None) -> list[str]:
-    """Apply any migrations not yet recorded. Returns names of newly-applied ones."""
+    """Apply any migrations not yet recorded. Returns names of newly-applied ones.
+
+    Migration DDL and the matching ``schema_migrations`` INSERT run inside a
+    single ``executescript`` transaction so a crash between them can't leave
+    the schema applied but unrecorded. Migration files must therefore NOT
+    contain their own ``BEGIN``/``COMMIT`` — the wrapper supplies them.
+    """
     owned = conn is None
     c = conn or connect()
     applied_now: list[str] = []
@@ -80,11 +86,21 @@ def run_migrations(conn: sqlite3.Connection | None = None) -> list[str]:
             if path.name in already:
                 continue
             sql = path.read_text(encoding="utf-8")
-            c.executescript("BEGIN;\n" + sql + "\nCOMMIT;")
-            c.execute(
-                "INSERT INTO schema_migrations(name) VALUES (?)",
-                (path.name,),
+            # Embed the migration name via a safely quoted string literal
+            # (migration file names are under our control and come from the
+            # package tree, but quote-escaping is cheap insurance).
+            safe_name = path.name.replace("'", "''")
+            # nosec B608 — ``safe_name`` comes from ``path.name`` on a file we
+            # ship inside the package tree, not user input. ``executescript``
+            # does not accept bound parameters, which is why we string-build
+            # the INSERT to keep it in the same atomic transaction as the DDL.
+            combined = (
+                "BEGIN;\n"
+                f"{sql}\n"
+                f"INSERT INTO schema_migrations(name) VALUES ('{safe_name}');\n"  # nosec B608
+                "COMMIT;"
             )
+            c.executescript(combined)
             applied_now.append(path.name)
     finally:
         if owned:

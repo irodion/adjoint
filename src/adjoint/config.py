@@ -1,7 +1,9 @@
 """Configuration — merges ~/.adjoint/config.toml and ./.adjoint/config.toml.
 
-All keys are optional. Zero-config install works. Project-level overrides
-shallow-merge over user config (top-level section keys replace, not deep-merge).
+All keys are optional; zero-config install works. Project-level overrides
+merge one level deep: an overlay section's keys extend/replace the base
+section's keys, rather than the whole section being swapped. Nested dicts
+beyond one level are not recursively merged.
 """
 
 from __future__ import annotations
@@ -88,14 +90,15 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 def _shallow_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Shallow-merge top-level keys. Section values from overlay fully replace base."""
+    """Merge top-level keys; one level of section-key merging underneath.
+
+    For each top-level key, if both sides carry a dict we produce a new dict
+    whose keys are ``base_section | overlay_section`` (overlay wins on key
+    collisions). Everything else is replaced wholesale by the overlay value.
+    """
     merged: dict[str, Any] = dict(base)
     for k, v in overlay.items():
-        if k == "providers" and isinstance(v, dict) and isinstance(merged.get(k), dict):
-            merged_providers = dict(merged[k])
-            merged_providers.update(v)
-            merged[k] = merged_providers
-        elif isinstance(v, dict) and isinstance(merged.get(k), dict):
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
             merged_sub = dict(merged[k])
             merged_sub.update(v)
             merged[k] = merged_sub

@@ -8,21 +8,16 @@ from pathlib import Path
 from adjoint.install import apply_install, build_install_plan
 from adjoint.paths import claude_settings_path
 
-EXPECTED_EVENTS = {
-    "SessionStart",
-    "SessionEnd",
-    "PreCompact",
-    "PreToolUse",
-    "PostToolUse",
-    "UserPromptSubmit",
-}
+# PreToolUse / PostToolUse / UserPromptSubmit are M2; they aren't registered
+# until their handlers stop being no-ops (see settings.hooks.json).
+EXPECTED_EVENTS = {"SessionStart", "SessionEnd", "PreCompact"}
 
 
 def _settings(project_dir: Path) -> dict:
     return json.loads(claude_settings_path("project", project_dir).read_text(encoding="utf-8"))
 
 
-def test_install_writes_all_six_hooks_and_mcp(adjoint_home: Path, project_dir: Path) -> None:
+def test_install_writes_expected_hooks_and_mcp(adjoint_home: Path, project_dir: Path) -> None:
     plan, merged = build_install_plan("project", project_dir)
     apply_install(plan, merged)
 
@@ -87,9 +82,6 @@ def test_migrations_applied_and_recorded(adjoint_home: Path, project_dir: Path) 
 
     from adjoint.store.sqlite import connect
 
-    with connect() as conn:  # type: ignore[attr-defined]
-        pass  # connect doesn't use a CM; do it explicitly:
-
     conn = connect()
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -104,4 +96,4 @@ def test_hooks_expected_from_status_helper(adjoint_home: Path, project_dir: Path
     from adjoint.cli import _hooks_installed
 
     found, total = _hooks_installed("project", project_dir)
-    assert (found, total) == (6, 6)
+    assert (found, total) == (len(EXPECTED_EVENTS), len(EXPECTED_EVENTS))

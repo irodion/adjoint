@@ -154,32 +154,31 @@ def _daemon_status() -> tuple[bool, str]:
         return False, f"socket present but not responsive ({exc})"
 
 
+# Hooks we currently register. PreToolUse / PostToolUse / UserPromptSubmit
+# are deliberately NOT in this set until M2 ships real handlers — registering
+# a no-op hook costs a Python process spawn per tool invocation.
+EXPECTED_HOOK_EVENTS: frozenset[str] = frozenset({"SessionStart", "SessionEnd", "PreCompact"})
+
+
 def _hooks_installed(scope: str, project_path: Path | None) -> tuple[int, int]:
+    total = len(EXPECTED_HOOK_EVENTS)
     target = claude_settings_path(scope, project_path)
     if not target.is_file():
-        return 0, 6
+        return 0, total
     try:
         data = json.loads(target.read_text(encoding="utf-8") or "{}")
     except json.JSONDecodeError:
-        return 0, 6
+        return 0, total
     hooks = data.get("hooks") or {}
     found = 0
-    expected_events = {
-        "SessionStart",
-        "SessionEnd",
-        "PreCompact",
-        "PreToolUse",
-        "PostToolUse",
-        "UserPromptSubmit",
-    }
     for event, entries in hooks.items():
-        if event not in expected_events:
+        if event not in EXPECTED_HOOK_EVENTS:
             continue
         for entry in entries or []:
             if any("adjoint-hook-" in (h.get("command") or "") for h in (entry.get("hooks") or [])):
                 found += 1
                 break
-    return found, len(expected_events)
+    return found, total
 
 
 @app.command()
@@ -191,7 +190,7 @@ def status(
     """Report hooks installed, daemon state, provider detection, version."""
     project_path = Path.cwd() if scope == "project" else None
     found, total = _hooks_installed(scope, project_path)
-    daemon_up, daemon_msg = _daemon_status()
+    _, daemon_msg = _daemon_status()
     providers = detect_all()
     provider_str = ", ".join(f"{p.name}={'found' if p.available else 'missing'}" for p in providers)
 
@@ -230,11 +229,17 @@ def config_path() -> None:
 
 @config_app.command("edit")
 def config_edit() -> None:
+    import shlex
+
     path = user_paths().config_toml
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
-    editor = os.environ.get("EDITOR", "vi")
-    os.execvp(editor, [editor, str(path)])
+    # EDITOR commonly carries flags ("code -w", "emacsclient -nw"); split
+    # them with shlex so execvp sees the program and its args separately.
+    parts = shlex.split(os.environ.get("EDITOR") or "vi")
+    if not parts:
+        parts = ["vi"]
+    os.execvp(parts[0], [*parts, str(path)])
 
 
 # ── memory / run / events stubs (M1+) ─────────────────────────────────────
@@ -386,18 +391,19 @@ def run_list(status: str | None = typer.Option(None, "--status")) -> None:
 
 
 @run_app.command("status")
-def run_status_cmd(id: str = typer.Argument(...)) -> None:
+def run_status_cmd(run_id: str = typer.Argument(...)) -> None:
     _not_yet("M4")
 
 
 @run_app.command("cancel")
-def run_cancel(id: str = typer.Argument(...)) -> None:
+def run_cancel(run_id: str = typer.Argument(...)) -> None:
     _not_yet("M4")
 
 
 @run_app.command("logs")
 def run_logs(
-    id: str = typer.Argument(...), follow: bool = typer.Option(False, "-f", "--follow")
+    run_id: str = typer.Argument(...),
+    follow: bool = typer.Option(False, "-f", "--follow"),
 ) -> None:
     _not_yet("M4")
 

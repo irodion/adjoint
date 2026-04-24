@@ -84,19 +84,24 @@ class HookTimeout(RuntimeError):
 
 @contextmanager
 def deadline(seconds: float) -> Iterator[None]:
-    """POSIX SIGALRM-based hard deadline. seconds may be fractional."""
+    """POSIX SIGALRM-based hard deadline.
+
+    Sub-second values are honoured — ``signal.setitimer`` takes a float, unlike
+    ``signal.alarm`` which rounds to whole seconds. The SessionStart hook's
+    300 ms budget would otherwise silently stretch to a full second.
+    """
 
     def _handler(signum: int, frame: Any) -> None:
         raise HookTimeout(f"hook exceeded {seconds:g}s deadline")
 
-    whole = max(1, int(round(seconds)))
-    old = signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(whole)
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    prev_timer = signal.getitimer(signal.ITIMER_REAL)
+    signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.001))
     try:
         yield
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
+        signal.setitimer(signal.ITIMER_REAL, *prev_timer)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def run_hook(

@@ -60,7 +60,7 @@ State lives in `~/.adjoint/` (override with `ADJOINT_HOME` env var — every tes
 
 ### Memory pipeline (the anchor feature)
 
-```
+```text
 SessionStart → inject knowledge/index.md as additionalContext
      ... session ...
 PreCompact / SessionEnd → spawn detached `adjoint memory flush` via Popen(start_new_session=True)
