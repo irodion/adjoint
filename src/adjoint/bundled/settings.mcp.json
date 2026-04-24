@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "adjoint": {
+      "type": "stdio",
+      "command": "adjoint-mcp",
+      "args": []
+    }
+  }
+}
