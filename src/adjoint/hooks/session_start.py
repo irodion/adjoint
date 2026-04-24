@@ -32,7 +32,14 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     cap = max(1024, cfg.memory.index_max_bytes)
     encoded = text.encode("utf-8")
     if len(encoded) > cap:
-        text = encoded[-cap:].decode("utf-8", errors="ignore")
+        # render_index puts the highest-value sections (Active Action Items,
+        # Recently Updated) at the TOP, so keep the head and cut at the last
+        # newline inside the budget to avoid a mid-line break.
+        head = encoded[:cap]
+        newline = head.rfind(b"\n")
+        if newline > 0:
+            head = head[: newline + 1]
+        text = head.decode("utf-8", errors="ignore")
 
     return {
         "hookSpecificOutput": {

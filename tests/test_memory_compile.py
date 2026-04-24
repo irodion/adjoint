@@ -128,6 +128,99 @@ def test_compile_dry_run_does_not_mutate(adjoint_home: Path, project_dir: Path) 
     )
 
 
+def test_recompile_drops_stale_daily_source_and_deletes_orphan(
+    adjoint_home: Path, project_dir: Path
+) -> None:
+    """Editing a daily so a concept no longer appears must evict that daily
+    from the article's sources, and the article itself if nothing remains."""
+    from adjoint.memory.state import CompileState
+    from adjoint.paths import user_paths
+
+    _write_daily(project_dir, "2026-04-24", "content v1")
+    single_concept = json.dumps(
+        [
+            {
+                "kind": "concept",
+                "slug": "only-concept",
+                "title": "Only Concept",
+                "tags": ["x"],
+                "summary": "A single concept supported solely by the 2026-04-24 daily.",
+                "related": [],
+            }
+        ]
+    )
+    agent1 = FakeAgent().enqueue(single_concept, "body for only-concept")
+    compile_project(project_path=project_dir, client=agent1)
+
+    pp = user_paths().project(project_dir)
+    article = pp.root / "knowledge/concepts/only-concept.md"
+    assert article.is_file()
+    state = CompileState.load(pp.state_json)
+    assert state.articles["knowledge/concepts/only-concept.md"].sources == ["daily/2026-04-24.md"]
+
+    # Edit the daily so extraction now returns [] — no candidate for the concept.
+    (pp.daily_dir / "2026-04-24.md").write_text("content v2 (empty)", encoding="utf-8")
+    agent2 = FakeAgent().enqueue(json.dumps([]))  # only the extraction call
+    result = compile_project(project_path=project_dir, client=agent2)
+
+    # Article is orphaned (no remaining source) → file removed, state entry gone.
+    assert not article.is_file()
+    state2 = CompileState.load(pp.state_json)
+    assert "knowledge/concepts/only-concept.md" not in state2.articles
+    assert "knowledge/concepts/only-concept.md" in result.articles_unchanged
+
+
+def test_recompile_prunes_one_source_but_keeps_article_when_others_remain(
+    adjoint_home: Path, project_dir: Path
+) -> None:
+    """Daily A and B both produce the concept; edit A so it no longer does;
+    the article survives but A disappears from its sources."""
+    from adjoint.memory.state import CompileState
+    from adjoint.paths import user_paths
+
+    _write_daily(project_dir, "2026-04-23", "first daily")
+    _write_daily(project_dir, "2026-04-24", "second daily")
+
+    concept_from_one = json.dumps(
+        [
+            {
+                "kind": "concept",
+                "slug": "shared",
+                "title": "Shared",
+                "tags": ["x"],
+                "summary": "A concept both dailies mention.",
+                "related": [],
+            }
+        ]
+    )
+    # First run: both dailies produce the candidate. Order matches alphabetical
+    # processing of dirty_daily (2026-04-23 then 2026-04-24). Only one merge
+    # call because candidates_by_article groups them under the same article.
+    agent1 = FakeAgent().enqueue(concept_from_one, concept_from_one, "initial body")
+    compile_project(project_path=project_dir, client=agent1)
+
+    pp = user_paths().project(project_dir)
+    state = CompileState.load(pp.state_json)
+    assert sorted(state.articles["knowledge/concepts/shared.md"].sources) == [
+        "daily/2026-04-23.md",
+        "daily/2026-04-24.md",
+    ]
+
+    # Edit only the 2026-04-23 daily; that extraction returns [].
+    # 2026-04-24 is unchanged so state.dirty_daily_logs excludes it — its
+    # candidate is not re-extracted, and the concept survives on the strength
+    # of 2026-04-24 alone.
+    (pp.daily_dir / "2026-04-23.md").write_text("stripped", encoding="utf-8")
+    agent2 = FakeAgent().enqueue(json.dumps([]))  # extraction only (no merge)
+    result = compile_project(project_path=project_dir, client=agent2)
+
+    article = pp.root / "knowledge/concepts/shared.md"
+    assert article.is_file()
+    state2 = CompileState.load(pp.state_json)
+    assert state2.articles["knowledge/concepts/shared.md"].sources == ["daily/2026-04-24.md"]
+    assert result.articles_updated == ["knowledge/concepts/shared.md"]
+
+
 def test_compile_git_commit_has_meaningful_message(adjoint_home: Path, project_dir: Path) -> None:
     _write_daily(project_dir, "2026-04-24", "content")
     agent = FakeAgent().enqueue(EXTRACTION_BASIC, "body1", "body2")

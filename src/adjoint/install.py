@@ -123,7 +123,12 @@ def build_install_plan(
 
     bundled = bundled_dir()
     hooks_bundle = json.loads((bundled / "settings.hooks.json").read_text(encoding="utf-8"))
-    mcp_bundle = json.loads((bundled / "settings.mcp.json").read_text(encoding="utf-8"))
+    # The ``adjoint-mcp`` entrypoint is an M3 placeholder that exits 1 on
+    # every invocation. Wiring it into Claude Code now would permanently
+    # surface a broken server in the UI; the merge is gated until M3 ships a
+    # real server (at which point this branch flips to reading
+    # ``settings.mcp.json`` again).
+    mcp_bundle: dict[str, Any] = {}
 
     merged, h_added, h_skipped = _merge_hooks(existing, hooks_bundle, force)
     merged, m_added, m_skipped = _merge_mcp(merged, mcp_bundle, force)

@@ -17,7 +17,7 @@ def _settings(project_dir: Path) -> dict:
     return json.loads(claude_settings_path("project", project_dir).read_text(encoding="utf-8"))
 
 
-def test_install_writes_expected_hooks_and_mcp(adjoint_home: Path, project_dir: Path) -> None:
+def test_install_writes_expected_hooks(adjoint_home: Path, project_dir: Path) -> None:
     plan, merged = build_install_plan("project", project_dir)
     apply_install(plan, merged)
 
@@ -27,7 +27,9 @@ def test_install_writes_expected_hooks_and_mcp(adjoint_home: Path, project_dir: 
         commands = [h["command"] for e in entries for h in e["hooks"]]
         assert any(c.startswith("adjoint-hook-") for c in commands), event
 
-    assert data["mcpServers"]["adjoint"]["command"] == "adjoint-mcp"
+    # MCP server wiring is gated until M3 ships a working server; no
+    # ``adjoint`` entry should appear in mcpServers yet.
+    assert "adjoint" not in (data.get("mcpServers") or {})
     assert (adjoint_home / "events.db").is_file()
 
 
@@ -66,9 +68,10 @@ def test_install_preserves_unrelated_user_entries(adjoint_home: Path, project_di
     session_start_cmds = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
     assert "echo hi" in session_start_cmds
     assert "adjoint-hook-session-start" in session_start_cmds
-    # Unrelated mcpServer preserved.
+    # Unrelated mcpServer preserved; adjoint's own server is still not wired
+    # (M3 gate — see install.build_install_plan).
     assert data["mcpServers"]["other"]["command"] == "other-mcp"
-    assert data["mcpServers"]["adjoint"]["command"] == "adjoint-mcp"
+    assert "adjoint" not in data["mcpServers"]
     # Unknown top-level keys preserved.
     assert data["someUserKey"] == "preserved"
     # Backup created because we mutated pre-existing content.

@@ -393,6 +393,12 @@ def compile_project(
     candidates_by_article: dict[str, list[Candidate]] = defaultdict(list)
     daily_hash_updates: dict[str, tuple[str, float]] = {}
     total_cost = 0.0
+    # Set of dailies that were re-extracted this run. If a daily was previously
+    # a source for some article but produced no candidate for it this run, the
+    # daily has been edited to no longer support that concept — we drop it from
+    # that article's sources (and may delete the article if nothing supports it
+    # anymore).
+    dirty_daily_rels = {_relpath(d, pp.root) for d in dirty_daily}
 
     for daily in dirty_daily:
         rel = _relpath(daily, pp.root)
@@ -459,8 +465,28 @@ def compile_project(
                 tags.add(t)
 
         contributions = [c.summary for c in cands]
+
+        # Sources: drop any previously-recorded daily that was re-extracted
+        # this run without producing a candidate for us (it no longer supports
+        # the concept), then add any daily that contributed this run.
+        existing_entry = state.articles.get(art_rel)
+        prior_sources: set[str] = set(existing_entry.sources) if existing_entry else set()
+        contributing_now = {c.source_daily for c in cands}
+        stale_sources = dirty_daily_rels & (prior_sources - contributing_now)
+        sources: set[str] = (prior_sources - stale_sources) | contributing_now
+
+        # Article has no supporting sources left → drop it.
+        if not sources:
+            if not creating and full.is_file():
+                full.unlink()
+            state.articles.pop(art_rel, None)
+            result.articles_unchanged.append(art_rel)
+            continue
+
         if not contributions:
-            # Article dirty but no new content — rewrite frontmatter only, body unchanged.
+            # Article dirty because a source changed, but extraction produced no
+            # new contribution here. Body left intact; frontmatter/sources will
+            # be rewritten to reflect the pruned source set.
             new_body = existing_body
             call_cost = 0.0
         else:
@@ -473,14 +499,6 @@ def compile_project(
                 contributions=contributions,
             )
             total_cost += call_cost
-
-        # Sources: union of existing + new contributions' daily.
-        sources: set[str] = set()
-        existing_entry = state.articles.get(art_rel)
-        if existing_entry:
-            sources.update(existing_entry.sources)
-        for c in cands:
-            sources.add(c.source_daily)
 
         rendered = _render_article(
             title=title,
@@ -540,7 +558,10 @@ def compile_project(
             p.write_text(rendered, encoding="utf-8")
 
     # Regenerate index.
-    write_index(pp)
+    # Use the same byte cap the SessionStart hook enforces so raising the
+    # config value produces a richer index and lowering it writes a
+    # correctly-sized file up front (instead of forcing the hook to truncate).
+    write_index(pp, max_bytes=max(1024, cfg.memory.index_max_bytes))
 
     # Persist state + commit.
     state.save(pp.state_json)
