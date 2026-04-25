@@ -64,6 +64,72 @@ def test_post_tool_use_writes_event_row(
     assert row["payload"]["duration_ms"] == 42
 
 
+def test_post_tool_use_strips_short_body_fields(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """A one-line .env secret is short but is exactly the kind of body we
+    must not persist verbatim. Body field names are always summarised."""
+    _install(project_dir)
+    secret = "OPENAI_API_KEY=sk-abc123"  # well under _PAYLOAD_STRING_CAP
+    stdin = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(project_dir),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/.env", "content": secret},
+            "tool_response": {"ok": True},
+        }
+    )
+    cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+    assert cp.returncode == 0
+    rows = _fetch_events()
+    ti = rows[0]["payload"]["tool_input"]
+    assert "content" not in ti, "short body must not be stored verbatim"
+    assert ti.get("content_len") == len(secret)
+    assert ti["file_path"] == "/tmp/.env"
+
+
+def test_post_tool_use_drops_row_under_db_contention(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """If another writer holds an exclusive lock, the audit insert must
+    fail-fast (within ~0.2 s) instead of stalling for the default 5 s."""
+    import sqlite3
+    import time
+
+    _install(project_dir)
+    blocker = sqlite3.connect(str(adjoint_home / "events.db"), timeout=30.0)
+    blocker.isolation_level = None
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute(
+        "INSERT INTO events(session_id, event_type, payload_json) VALUES(?, ?, ?)",
+        ("blocker", "test", "{}"),
+    )
+    try:
+        stdin = json.dumps(
+            {
+                "session_id": "s",
+                "cwd": str(project_dir),
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_response": {"ok": True},
+            }
+        )
+        t0 = time.monotonic()
+        cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+        elapsed = time.monotonic() - t0
+        assert cp.returncode == 0
+        # Generous upper bound — well below the prior ~5.4 s reported by the
+        # reviewer. Subprocess cold-start dominates; the SQLite wait itself
+        # should hit the 200 ms ceiling.
+        assert elapsed < 2.0, f"audit hook stalled for {elapsed:.2f}s"
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
 def test_post_tool_use_summarizes_long_tool_input(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:
@@ -147,14 +213,14 @@ def test_post_tool_use_summarizes_nested_multiedit_payload(
     assert len(rows) == 1
     edits = rows[0]["payload"]["tool_input"]["edits"]
     assert len(edits) == 2
-    # First edit: long bodies replaced with *_len keys.
+    # Body fields are always summarised — short or long.
     assert edits[0].get("old_string_len") == len(big)
     assert edits[0].get("new_string_len") == len(big)
     assert "old_string" not in edits[0]
     assert "new_string" not in edits[0]
-    # Second edit: short bodies preserved.
-    assert edits[1]["old_string"] == "short"
-    assert edits[1]["new_string"] == "also short"
+    assert edits[1].get("old_string_len") == len("short")
+    assert edits[1].get("new_string_len") == len("also short")
+    assert "old_string" not in edits[1]
 
 
 def test_summarize_response_handles_str_and_list() -> None:

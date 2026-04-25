@@ -23,20 +23,37 @@ from ._runtime import HookInput, run_hook
 
 _PAYLOAD_STRING_CAP = 256
 
+# Field names whose values are user-edited bodies — always replaced with a
+# length summary regardless of size. A one-line ``.env`` secret or short
+# token is exactly the kind of tool input we don't want in the audit DB,
+# even though it falls under ``_PAYLOAD_STRING_CAP``. Covers Write / Edit /
+# MultiEdit / NotebookEdit shapes and Read responses.
+_BODY_FIELDS = frozenset({"content", "old_string", "new_string", "old_source", "new_source"})
+
+# Audit writes need to fail fast if the DB is contended, not stall past the
+# hook's 0.5 s deadline. If another adjoint process holds a lock, dropping
+# this row is cheaper than blocking the user's tool invocation.
+_AUDIT_BUSY_TIMEOUT_MS = 200
+
 
 def _summarize_response(tool_response: Any) -> Any:
-    """Trim bulky payloads before storing them in events.db.
+    """Trim bulky / sensitive payloads before storing them in events.db.
 
-    Long strings (>_PAYLOAD_STRING_CAP) collapse to ``<k>_len`` (in dicts) or
-    ``{"_value_len": N}`` (bare). Dict / list children recurse so nested
-    payloads — e.g. MultiEdit's ``{"edits": [{"old_string": ..., "new_string":
-    ...}]}`` — are also trimmed. The transcript already has the full text, so
-    there's no audit value in duplicating it here, only privacy and size cost.
+    A dict value gets replaced with ``<k>_len`` when either:
+
+    * its key is a known body field (``content`` / ``old_string`` / etc.) —
+      regardless of length, so short secrets don't leak; or
+    * the value is a string longer than ``_PAYLOAD_STRING_CAP``.
+
+    Dict / list children recurse so nested payloads — e.g. MultiEdit's
+    ``{"edits": [{"old_string": ..., "new_string": ...}]}`` — are also
+    trimmed. The transcript already has the full text, so there's no audit
+    value in duplicating it here, only privacy and size cost.
     """
     if isinstance(tool_response, dict):
         out: dict[str, Any] = {}
         for k, v in tool_response.items():
-            if isinstance(v, str) and len(v) > _PAYLOAD_STRING_CAP:
+            if isinstance(v, str) and (k in _BODY_FIELDS or len(v) > _PAYLOAD_STRING_CAP):
                 out[f"{k}_len"] = len(v)
             elif isinstance(v, (dict, list)):
                 out[k] = _summarize_response(v)
@@ -65,7 +82,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     }
     event_type = f"hook.{hook_input.hook_event_name or 'PostToolUse'}"
     try:
-        conn = connect()
+        conn = connect(busy_timeout_ms=_AUDIT_BUSY_TIMEOUT_MS)
         try:
             conn.execute(
                 "INSERT INTO events(session_id, event_type, payload_json) VALUES(?, ?, ?)",

@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 from ..config import PoliciesConfig, load_config
 from ..paths import user_paths
 from ..policies.loader import discover_policies, run_policies
-from ..policies.types import ToolUseContext
+from ..policies.types import ToolUseContext, freeze_tool_input
 from ._runtime import HookInput, run_hook
 
 _DEFAULT_REASON = {
@@ -71,7 +70,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     raw = hook_input.raw
     ctx = ToolUseContext(
         tool_name=str(raw.get("tool_name", "")),
-        tool_input=MappingProxyType(dict(raw.get("tool_input", {}) or {})),
+        tool_input=freeze_tool_input(raw.get("tool_input", {}) or {}),
         cwd=cwd,
         session_id=hook_input.session_id,
         transcript_path=hook_input.transcript_path,

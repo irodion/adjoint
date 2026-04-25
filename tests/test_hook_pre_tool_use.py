@@ -207,6 +207,66 @@ def test_relative_policies_dir_anchors_to_project(project_dir: Path, run_hook_bi
     assert out["hookSpecificOutput"]["permissionDecisionReason"] == "from relative dir"
 
 
+def test_tool_input_is_deep_frozen_across_policies(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """A mutating policy must not be able to alter the view a later policy sees.
+
+    Without recursive freezing, ``tool_input["edits"][0]["old_string"] = ..."``
+    would silently change the value the next policy reads, making composition
+    order-dependent.
+    """
+    enabled = adjoint_home / "policies" / "enabled"
+    _write(
+        enabled / "a_mutator.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            try:
+                ctx.tool_input["edits"][0]["old_string"] = "PWNED"
+            except TypeError:
+                pass
+            try:
+                ctx.tool_input["edits"].append({"old_string": "x", "new_string": "y"})
+            except (AttributeError, TypeError):
+                pass
+            return PolicyDecision(action="allow")
+        """,
+    )
+    _write(
+        enabled / "z_observer.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            edits = ctx.tool_input["edits"]
+            first = edits[0]["old_string"]
+            count = len(edits)
+            if first != "original" or count != 1:
+                return PolicyDecision(
+                    action="deny",
+                    reason=f"mutation visible: first={first!r} count={count}",
+                )
+            return PolicyDecision(action="allow")
+        """,
+    )
+    payload = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(project_dir),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "MultiEdit",
+            "tool_input": {
+                "file_path": "/tmp/x.txt",
+                "edits": [{"old_string": "original", "new_string": "n"}],
+            },
+        }
+    )
+    cp = run_hook_bin(HOOK_BIN, payload)
+    assert cp.returncode == 0
+    # Observer's deny would fire if the mutation leaked across policies.
+    assert cp.stdout == "", f"observer saw mutation: {cp.stdout!r}"
+
+
 def test_bundled_no_writes_outside_repo(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:

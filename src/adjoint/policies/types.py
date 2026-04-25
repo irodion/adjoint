@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
@@ -29,9 +30,11 @@ class PolicyDecision(BaseModel):
 @dataclass(frozen=True)
 class ToolUseContext:
     tool_name: str
-    # Read-only at the type layer. ``pre_tool_use`` wraps the raw dict in a
-    # ``types.MappingProxyType`` so an earlier policy can't mutate the view a
-    # later one receives.
+    # Recursively immutable. ``freeze_tool_input`` wraps every dict in a
+    # ``MappingProxyType`` and converts every list to a tuple, so an earlier
+    # policy can't mutate the view a later policy receives. Lists become
+    # tuples — policies that do ``isinstance(x, list)`` need to allow
+    # ``Sequence`` instead, but iteration / indexing / ``len`` still work.
     tool_input: Mapping[str, Any]
     cwd: Path
     session_id: str | None
@@ -40,3 +43,19 @@ class ToolUseContext:
 
 class PolicyFn(Protocol):
     def __call__(self, ctx: ToolUseContext) -> PolicyDecision: ...
+
+
+def freeze_tool_input(value: Any) -> Any:
+    """Recursively freeze a ``tool_input`` payload for cross-policy isolation.
+
+    Dicts (and ``Mapping`` subtypes) become ``MappingProxyType``; lists become
+    tuples. Other values are returned as-is — strings, numbers, bytes, and
+    ``None`` are already immutable. The returned structure is safe to share
+    across sequentially-invoked policies without one being able to alter the
+    view another sees.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: freeze_tool_input(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(freeze_tool_input(v) for v in value)
+    return value

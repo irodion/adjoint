@@ -5,6 +5,12 @@ module-level ``decide(ctx: ToolUseContext) -> PolicyDecision``. The
 ``PreToolUse`` hook discovers and runs them via ``loader.py``.
 """
 
-from .types import PolicyAction, PolicyDecision, PolicyFn, ToolUseContext
+from .types import PolicyAction, PolicyDecision, PolicyFn, ToolUseContext, freeze_tool_input
 
-__all__ = ["PolicyAction", "PolicyDecision", "PolicyFn", "ToolUseContext"]
+__all__ = [
+    "PolicyAction",
+    "PolicyDecision",
+    "PolicyFn",
+    "ToolUseContext",
+    "freeze_tool_input",
+]
