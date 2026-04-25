@@ -27,18 +27,28 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
+def _connect(db_path: Path, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=5.0)
+    timeout_s = max(busy_timeout_ms / 1000.0, 0.05)
+    conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=timeout_s)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def connect() -> sqlite3.Connection:
-    return _connect(user_paths().events_db)
+def connect(busy_timeout_ms: int = 5000) -> sqlite3.Connection:
+    """Open the events.db with the standard pragmas.
+
+    ``busy_timeout_ms`` controls how long both Python's ``sqlite3.connect``
+    and SQLite's internal retry loop wait when the DB is locked. Long-running
+    work (CLI, daemon, migrations) leaves it at the default 5 s; latency-
+    sensitive callers like the PostToolUse audit hook should pass something
+    much tighter so a contended write drops the row instead of stalling the
+    tool invocation past its fail-open budget.
+    """
+    return _connect(user_paths().events_db, busy_timeout_ms)
 
 
 def _bootstrap_schema(conn: sqlite3.Connection) -> None:

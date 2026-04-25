@@ -8,9 +8,19 @@ from pathlib import Path
 from adjoint.install import apply_install, build_install_plan
 from adjoint.paths import claude_settings_path
 
-# PreToolUse / PostToolUse / UserPromptSubmit are M2; they aren't registered
-# until their handlers stop being no-ops (see settings.hooks.json).
-EXPECTED_EVENTS = {"SessionStart", "SessionEnd", "PreCompact"}
+# Kept local rather than imported from ``adjoint.cli`` — importing that module
+# at test collection time drags in ``providers.codex``, which runs
+# ``get_logger()`` at module load and would configure a log handler against
+# the real ``~/.adjoint/`` before the ``adjoint_home`` fixture redirects it.
+EXPECTED_EVENTS = {
+    "SessionStart",
+    "SessionEnd",
+    "PreCompact",
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+}
+BUNDLED_POLICIES = {"no_writes_outside_repo.py", "safe_bash.py", "log_only.py"}
 
 
 def _settings(project_dir: Path) -> dict:
@@ -100,3 +110,11 @@ def test_hooks_expected_from_status_helper(adjoint_home: Path, project_dir: Path
 
     found, total = _hooks_installed("project", project_dir)
     assert (found, total) == (len(EXPECTED_EVENTS), len(EXPECTED_EVENTS))
+
+
+def test_install_copies_bundled_policies(adjoint_home: Path, project_dir: Path) -> None:
+    plan, merged = build_install_plan("project", project_dir)
+    apply_install(plan, merged)
+    disabled_dir = adjoint_home / "policies" / "disabled"
+    actual = {p.name for p in disabled_dir.glob("*.py")}
+    assert actual >= BUNDLED_POLICIES, f"missing bundled policies: {BUNDLED_POLICIES - actual}"

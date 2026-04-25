@@ -33,6 +33,49 @@ def project_hash(project_path: Path | str) -> str:
     return digest[:12]
 
 
+# Markers that identify a project root. ``.adjoint/`` is our own per-project
+# config dir; ``.claude/`` is Claude Code's per-project settings dir (always
+# present after ``adjoint install --project``); ``.git`` is the universal
+# repo marker (file in worktrees / submodules, directory otherwise). The
+# closest ancestor containing any of them wins; fall back to the start path
+# if nothing matches.
+_PROJECT_ROOT_MARKERS = (".adjoint", ".claude", ".git")
+
+
+def find_project_root(start: Path | str) -> Path:
+    """Walk up from ``start`` to find the enclosing project root.
+
+    Claude Code launches hooks with ``cwd`` set to wherever the user started
+    the session — which can be ``<repo>/subdir/`` rather than the repo root.
+    Anything keyed on the project root (``load_config``, ``user_paths().project``,
+    repo-boundary policies) needs the actual root, not the literal cwd.
+
+    The walk-up stops at ``Path.home()`` exclusive: ``~/.adjoint/`` and
+    ``~/.claude/`` exist globally after install, so without this guard a
+    session started in any subdirectory of HOME would resolve to HOME itself
+    as the "project". Sessions outside HOME (``/tmp``, ``/srv``) walk all the
+    way up. Returns ``start`` when no marker is found below HOME.
+    """
+    here = Path(start).expanduser().resolve()
+    try:
+        home = Path.home().resolve()
+    except RuntimeError:
+        home = None
+    for d in (here, *here.parents):
+        if home is not None and d == home:
+            # Don't auto-treat HOME as a project just because the global
+            # ``~/.adjoint`` / ``~/.claude`` exist after install. But honor
+            # an explicit ``.git`` at HOME — a dotfiles repo rooted at ~ is
+            # a real project, and missing it would silently break config /
+            # policies / audit / enrichment for any subdirectory session.
+            if (d / ".git").exists():
+                return d
+            break
+        if any((d / m).exists() for m in _PROJECT_ROOT_MARKERS):
+            return d
+    return here
+
+
 @dataclass(frozen=True)
 class UserPaths:
     root: Path

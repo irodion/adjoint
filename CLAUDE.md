@@ -74,6 +74,21 @@ Two passes in `compile_project`:
 1. **Pass 1** — LLM extraction + merge/create for articles whose source dailies are dirty.
 2. **Pass 2** — deterministic `## Backlinks` regeneration using a cached single read of every article (`_load_articles_on_disk` shared with `_collect_backlinks`). Pass 2 only writes when rendered output differs from disk, so incremental no-op runs produce no git commit.
 
+### Policies (PreToolUse)
+
+User-authored Python files at `~/.adjoint/policies/enabled/*.py` that veto, gate, or wave through tool calls. Each module must export a top-level `decide(ctx: ToolUseContext) -> PolicyDecision`. Files starting with `_` are skipped — keep sibling helpers under that prefix. Bundled starter examples live in `src/adjoint/bundled/policies/` and are copied to `~/.adjoint/policies/disabled/` on `adjoint install`; users opt in by symlinking into `enabled/`.
+
+`PolicyDecision.action` is a Literal — v1 emits `allow` / `deny` / `ask`; `modify` and `defer` are reserved values that collapse to `allow` during composition. The compose rule in `policies/loader.py::compose` is **first deny wins, else first ask, else allow**.
+
+Two load-bearing invariants in `policies/loader.py`:
+
+- **Daemon thread for per-policy timeout.** `_run_one` uses `threading.Thread(daemon=True)` + `join(timeout)`. **Do not** switch to `concurrent.futures.ThreadPoolExecutor` — its workers are non-daemon and `concurrent.futures.thread._python_exit` joins every still-registered worker at interpreter shutdown, so a hung policy would block the hook process from exiting and defeat the fail-open contract. `test_timeout_uses_daemon_thread` enforces this.
+- **Scoped `sys.path` prepend during discovery.** `_on_sys_path` prepends `policies_dir` only for the duration of `discover_policies`, so a policy's module-top `from _helper import RULES` resolves. Removed on exit so back-to-back discovery calls in pytest don't pollute path. `test_discover_does_not_leak_sys_path` enforces.
+
+Resolving the directory in `hooks/pre_tool_use.py::_resolve_policies_dir`: matches the literal default string of `PoliciesConfig.dir` and routes through `user_paths().policies_enabled` (which honors `ADJOINT_HOME`); explicit overrides go through plain `expanduser`. Don't replace this with a naïve `Path(cfg.policies.dir).expanduser()` — tests rely on the env override.
+
+`PostToolUse` audit writes are gated on `cfg.audit.enabled`. That flag is the privacy switch for `events.db` storage.
+
 ### Recursion guard (load-bearing)
 
 Every adjoint subprocess sets `CLAUDE_INVOKED_BY` to a value in the `RecursionTag` Literal (`adjoint`, `adjoint_flush`, `adjoint_compile`, `adjoint_query`, `adjoint_second_opinion`, `adjoint_variants`, `adjoint_run`). Hooks short-circuit when they see any of these. This is what prevents e.g. a flush subprocess → `claude` → fires `SessionEnd` → spawns *another* flush.
@@ -118,10 +133,9 @@ These were extracted from three separate modules; don't re-inline them.
 
 ### Milestone status
 
-What's live (M0 + M1): `install`, `status`, `providers list`, `config show|edit|path`, `memory flush|compile|query|lint`, SessionStart/SessionEnd/PreCompact hooks, the SQLite schema + migration runner.
+What's live (M0 + M1 + M2): `install`, `status`, `providers list`, `config show|edit|path`, `memory flush|compile|query|lint`, all six hooks (SessionStart/SessionEnd/PreCompact + PreToolUse policy loader + PostToolUse audit + UserPromptSubmit enrichment), `adjoint events tail`, the SQLite schema + migration runner.
 
 Stubbed (exit with an explanatory message — `_not_yet(milestone)` in `cli.py`):
-- M2 — policy loader + real PreToolUse/PostToolUse/UserPromptSubmit, `adjoint events tail`
 - M3 — stdio MCP tools (`adjoint-mcp` currently exits 1)
 - M4 — daemon (`adjoint serve`, `adjoint run *`)
 

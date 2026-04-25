@@ -17,6 +17,41 @@ cd ~/my-project
 adjoint install --project
 ```
 
+## Hook surface
+
+Six Claude Code hooks land in `.claude/settings.json` on install:
+`SessionStart` / `SessionEnd` / `PreCompact` drive the memory pipeline;
+`PreToolUse` runs user policies; `PostToolUse` writes the audit stream;
+`UserPromptSubmit` injects related concepts into prompts (opt-in).
+
+### Policies
+
+Drop a Python file at `~/.adjoint/policies/enabled/*.py` to allow, ask, or deny tool calls. Each module exports a top-level `decide(ctx)`:
+
+```python
+from adjoint.policies.types import PolicyDecision, ToolUseContext
+
+def decide(ctx: ToolUseContext) -> PolicyDecision:
+    if ctx.tool_name == "Bash" and "rm -rf" in ctx.tool_input.get("command", ""):
+        return PolicyDecision(action="ask", reason="please confirm `rm -rf`")
+    return PolicyDecision(action="allow")
+```
+
+Composition is `deny > ask > allow`. Each policy runs with a per-policy timeout (`policies.timeout_ms`, default 500 ms) and fails open on any error — adjoint is **not** a security boundary.
+
+`adjoint install` copies three starter examples into `~/.adjoint/policies/disabled/` (`no_writes_outside_repo`, `safe_bash`, `log_only`); symlink one into `enabled/` to activate.
+
+### Audit
+
+PostToolUse records every tool invocation to `~/.adjoint/events.db`. Tail the stream:
+
+```bash
+adjoint events tail -n 20
+adjoint events tail --type hook. -f      # follow, hook.* events only
+```
+
+Disable storage entirely with `[audit] enabled = false` in `~/.adjoint/config.toml`.
+
 ## Development
 
 ```bash
