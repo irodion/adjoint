@@ -2,9 +2,9 @@
 
 Gated on ``memory.enrich_prompts`` (default False). Tokenises the prompt and
 each concept's slug + frontmatter title, scores by token-set intersection
-(slug overlap weighted 2× since the filename encodes the canonical topic),
+(slug overlap weighted 2x since the filename encodes the canonical topic),
 and emits up to three ``[[concepts/<slug>]]`` references as
-``additionalContext``. Intentionally no LLM call — cheap heuristic only.
+``additionalContext``. Intentionally no LLM call - cheap heuristic only.
 
 Any error or budget miss collapses to pass-through (return None).
 """
@@ -23,8 +23,8 @@ from ._runtime import HookInput, run_hook
 
 _STOPWORDS = frozenset(
     {
-        # 2–3 char common English words. Required because ``_TOKEN_RE`` now
-        # accepts 2+ char tokens — otherwise "the" / "and" / "for" would
+        # 2-3 char common English words. Required because ``_TOKEN_RE`` now
+        # accepts 2+ char tokens - otherwise "the" / "and" / "for" would
         # leak into prompt and slug token sets and create noise.
         "an",
         "as",

@@ -51,36 +51,44 @@ _BODY_FIELDS = frozenset(
 _AUDIT_BUSY_TIMEOUT_MS = 200
 
 
-def _summarize_response(tool_response: Any) -> Any:
+def _summarize_response(tool_response: Any, *, parent_is_body: bool = False) -> Any:
     """Trim bulky / sensitive payloads before storing them in events.db.
 
     A dict value gets replaced with ``<k>_len`` when either:
 
     * its key is a known body field (``content`` / ``old_string`` / etc.) —
       regardless of length, so short secrets don't leak; or
+    * any ancestor key was a body field (so e.g.
+      ``content: {"chunks": ["secret"]}`` strips the inner strings even
+      though ``chunks`` itself isn't in the body list); or
     * the value is a string longer than ``_PAYLOAD_STRING_CAP``.
 
-    Dict / list children recurse so nested payloads — e.g. MultiEdit's
-    ``{"edits": [{"old_string": ..., "new_string": ...}]}`` — are also
-    trimmed. The transcript already has the full text, so there's no audit
-    value in duplicating it here, only privacy and size cost.
+    ``parent_is_body`` is the recursion state — once a body-named ancestor
+    has been crossed, every descendant string is treated as body content.
+    The transcript already has the full text, so there's no audit value in
+    duplicating it here, only privacy and size cost.
     """
     if isinstance(tool_response, dict):
         out: dict[str, Any] = {}
         for k, v in tool_response.items():
+            child_is_body = parent_is_body or k in _BODY_FIELDS
             # Empty strings (e.g. ``stderr: ""`` on success) skip the strip:
             # ``stderr_len: 0`` is just noise, and there's no privacy concern
             # in keeping the empty string.
-            if isinstance(v, str) and v and (k in _BODY_FIELDS or len(v) > _PAYLOAD_STRING_CAP):
+            if isinstance(v, str) and v and (child_is_body or len(v) > _PAYLOAD_STRING_CAP):
                 out[f"{k}_len"] = len(v)
             elif isinstance(v, (dict, list)):
-                out[k] = _summarize_response(v)
+                out[k] = _summarize_response(v, parent_is_body=child_is_body)
             else:
                 out[k] = v
         return out
     if isinstance(tool_response, list):
-        return [_summarize_response(item) for item in tool_response]
-    if isinstance(tool_response, str) and len(tool_response) > _PAYLOAD_STRING_CAP:
+        return [_summarize_response(item, parent_is_body=parent_is_body) for item in tool_response]
+    if (
+        isinstance(tool_response, str)
+        and tool_response
+        and (parent_is_body or len(tool_response) > _PAYLOAD_STRING_CAP)
+    ):
         return {"_value_len": len(tool_response)}
     return tool_response
 

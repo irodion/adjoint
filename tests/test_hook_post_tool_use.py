@@ -100,13 +100,14 @@ def test_post_tool_use_strips_short_body_fields(
     must not persist verbatim. Body field names are always summarised."""
     _install(project_dir)
     secret = "OPENAI_API_KEY=sk-abc123"  # well under _PAYLOAD_STRING_CAP
+    target_path = str(project_dir / ".env")
     stdin = json.dumps(
         {
             "session_id": "s",
             "cwd": str(project_dir),
             "hook_event_name": "PostToolUse",
             "tool_name": "Write",
-            "tool_input": {"file_path": "/tmp/.env", "content": secret},
+            "tool_input": {"file_path": target_path, "content": secret},
             "tool_response": {"ok": True},
         }
     )
@@ -116,7 +117,7 @@ def test_post_tool_use_strips_short_body_fields(
     ti = rows[0]["payload"]["tool_input"]
     assert "content" not in ti, "short body must not be stored verbatim"
     assert ti.get("content_len") == len(secret)
-    assert ti["file_path"] == "/tmp/.env"
+    assert ti["file_path"] == target_path
 
 
 def test_post_tool_use_drops_row_under_db_contention(
@@ -165,13 +166,14 @@ def test_post_tool_use_summarizes_long_tool_input(
     """Write/Edit tool_input bodies must not land verbatim in events.db."""
     _install(project_dir)
     big = "secret-content " * 200  # >> _PAYLOAD_STRING_CAP
+    target_path = str(project_dir / "x.txt")
     stdin = json.dumps(
         {
             "session_id": "s",
             "cwd": str(project_dir),
             "hook_event_name": "PostToolUse",
             "tool_name": "Write",
-            "tool_input": {"file_path": "/tmp/x.txt", "content": big},
+            "tool_input": {"file_path": target_path, "content": big},
             "tool_response": {"ok": True},
         }
     )
@@ -180,7 +182,7 @@ def test_post_tool_use_summarizes_long_tool_input(
     rows = _fetch_events()
     assert len(rows) == 1
     ti = rows[0]["payload"]["tool_input"]
-    assert ti["file_path"] == "/tmp/x.txt"
+    assert ti["file_path"] == target_path
     assert "content" not in ti, "raw content must not be persisted"
     assert ti.get("content_len") == len(big)
 
@@ -220,6 +222,7 @@ def test_post_tool_use_summarizes_nested_multiedit_payload(
     """
     _install(project_dir)
     big = "secret-old-content " * 200  # >> _PAYLOAD_STRING_CAP
+    target_path = str(project_dir / "x.txt")
     stdin = json.dumps(
         {
             "session_id": "s",
@@ -227,7 +230,7 @@ def test_post_tool_use_summarizes_nested_multiedit_payload(
             "hook_event_name": "PostToolUse",
             "tool_name": "MultiEdit",
             "tool_input": {
-                "file_path": "/tmp/x.txt",
+                "file_path": target_path,
                 "edits": [
                     {"old_string": big, "new_string": big},
                     {"old_string": "short", "new_string": "also short"},
@@ -250,6 +253,30 @@ def test_post_tool_use_summarizes_nested_multiedit_payload(
     assert edits[1].get("old_string_len") == len("short")
     assert edits[1].get("new_string_len") == len("also short")
     assert "old_string" not in edits[1]
+
+
+def test_summarize_response_propagates_body_context_into_nested() -> None:
+    """Strings nested under a body-named ancestor are body content too.
+
+    A hypothetical tool with shape ``{"content": {"chunks": ["secret"]}}``
+    must not leak the inner strings just because ``chunks`` itself isn't in
+    ``_BODY_FIELDS``.
+    """
+    from adjoint.hooks.post_tool_use import _summarize_response
+
+    out = _summarize_response(
+        {
+            "file_path": "ok",
+            "content": {"chunks": ["secret-1", "secret-2"], "meta": {"label": "k"}},
+        }
+    )
+    assert out["file_path"] == "ok"
+    chunks = out["content"]["chunks"]
+    # Both inner strings stripped to ``{"_value_len": N}`` shape.
+    assert all(isinstance(c, dict) and "_value_len" in c for c in chunks)
+    assert chunks[0]["_value_len"] == len("secret-1")
+    # Strings deeper still stripped (nested dict under content).
+    assert out["content"]["meta"]["label_len"] == 1
 
 
 def test_summarize_response_handles_str_and_list() -> None:
