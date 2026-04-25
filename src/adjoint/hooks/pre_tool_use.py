@@ -32,6 +32,12 @@ _DEFAULT_REASON = {
 # does not.
 _DEFAULT_DIR = PoliciesConfig.model_fields["dir"].default
 
+# Budget for the policy loop. The outer ``run_hook`` deadline is 2.0 s; we
+# leave ~500 ms slack for ``load_config``, ``discover_policies`` imports,
+# composition, and JSON emit. Without this clamp, N slow policies × the
+# per-policy timeout could exceed the SIGALRM and silently fail-open.
+_RUN_POLICIES_BUDGET_S = 1.5
+
 
 def _resolve_policies_dir(configured: str, project_cwd: Path) -> Path:
     """Map ``cfg.policies.dir`` to a real filesystem path.
@@ -70,7 +76,9 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
         session_id=hook_input.session_id,
         transcript_path=hook_input.transcript_path,
     )
-    decision = run_policies(ctx, policies, cfg.policies.timeout_ms)
+    decision = run_policies(
+        ctx, policies, cfg.policies.timeout_ms, total_budget_s=_RUN_POLICIES_BUDGET_S
+    )
 
     if decision.action in ("deny", "ask"):
         return {

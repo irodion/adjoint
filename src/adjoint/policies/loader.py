@@ -18,12 +18,27 @@ import contextlib
 import importlib.util
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from ..log import get_logger, log_event
 from .types import PolicyDecision, PolicyFn, ToolUseContext
+
+
+def _log(msg: str, **extras: Any) -> None:
+    """Log to the structured logger if available; swallow OSError if not.
+
+    Discovery and execution must work in restricted environments — read-only
+    home, sandbox CI, locked-down containers — where
+    ``~/.adjoint/logs/adjoint.jsonl`` can't be opened. Without this guard the
+    OSError bubbles out of ``get_logger`` (via ``configure``), the PreToolUse
+    hook's outer try/except catches it, and every policy is silently disabled.
+    """
+    with contextlib.suppress(OSError):
+        log_event(get_logger("policies.loader"), msg, **extras)
 
 
 @contextlib.contextmanager
@@ -55,7 +70,6 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
     """
     if not policies_dir.is_dir():
         return []
-    logger = get_logger("policies.loader")
     out: list[tuple[str, PolicyFn]] = []
     with _on_sys_path(policies_dir):
         for path in sorted(policies_dir.glob("*.py")):
@@ -65,7 +79,7 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
             try:
                 spec = importlib.util.spec_from_file_location(mod_name, path)
                 if spec is None or spec.loader is None:
-                    log_event(logger, "policy.import.skip", path=str(path), reason="no-spec")
+                    _log("policy.import.skip", path=str(path), reason="no-spec")
                     continue
                 module = importlib.util.module_from_spec(spec)
                 # Register before ``exec_module`` so the policy can reference
@@ -79,8 +93,7 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
                     sys.modules.pop(mod_name, None)
                     raise
             except Exception as exc:  # noqa: BLE001 — fail-open on import error
-                log_event(
-                    logger,
+                _log(
                     "policy.import.error",
                     path=str(path),
                     error=str(exc),
@@ -89,7 +102,7 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
                 continue
             decide = getattr(module, "decide", None)
             if not callable(decide):
-                log_event(logger, "policy.import.skip", path=str(path), reason="no-decide")
+                _log("policy.import.skip", path=str(path), reason="no-decide")
                 continue
             out.append((path.stem, decide))
     return out
@@ -109,7 +122,6 @@ def _run_one(
     timeout. A daemon thread is killed when the hook process exits, so a
     wedged policy can't keep the interpreter alive.
     """
-    logger = get_logger("policies.loader")
     outcome: list[object] = []
 
     def _target() -> None:
@@ -122,15 +134,14 @@ def _run_one(
     t.start()
     t.join(timeout_s)
     if t.is_alive():
-        log_event(logger, "policy.timeout", policy=name, timeout_s=timeout_s)
+        _log("policy.timeout", policy=name, timeout_s=timeout_s)
         return None
     if not outcome:
-        log_event(logger, "policy.no_result", policy=name)
+        _log("policy.no_result", policy=name)
         return None
     result = outcome[0]
     if isinstance(result, BaseException):
-        log_event(
-            logger,
+        _log(
             "policy.error",
             policy=name,
             error=str(result),
@@ -138,7 +149,7 @@ def _run_one(
         )
         return None
     if not isinstance(result, PolicyDecision):
-        log_event(logger, "policy.bad_return", policy=name, returned=type(result).__name__)
+        _log("policy.bad_return", policy=name, returned=type(result).__name__)
         return None
     return result
 
@@ -158,23 +169,41 @@ def run_policies(
     ctx: ToolUseContext,
     policies: list[tuple[str, PolicyFn]],
     timeout_ms: int,
+    *,
+    total_budget_s: float | None = None,
 ) -> PolicyDecision:
     """Run policies sequentially with ``timeout_ms`` each, compose the result.
 
-    Short-circuits on the first decisive (``deny`` or ``ask``) result. Without
-    this, a fast deny followed by several slow allows would push past the
-    outer PreToolUse 2 s deadline — the SIGALRM in ``run_hook`` would fire
-    inside this loop, skipping ``compose`` and letting fail-open silently
-    promote the tool call to allow. Surfacing the decisive result we already
-    have always beats losing it to a timeout.
+    Two protections against the outer hook deadline:
+
+    1. ``total_budget_s`` (when set) caps the entire run. Each per-policy
+       timeout is clamped to whatever's left in the budget, and the loop
+       breaks once exhausted. Without this, ``timeout_ms × N`` could exceed
+       the outer 2 s SIGALRM in ``run_hook`` — the alarm would fire inside
+       the loop, skip ``compose``, and fail-open silently promote a denied
+       tool call to allow.
+
+    2. Short-circuit on ``deny`` only. ``deny`` is the strongest outcome under
+       the compose rule, so no later policy can change it. We deliberately do
+       *not* short-circuit on ``ask``: a later policy's ``deny`` must be able
+       to override an earlier ``ask`` per the documented composition order.
     """
     timeout_s = max(timeout_ms / 1000.0, 0.001)
+    deadline = time.monotonic() + total_budget_s if total_budget_s is not None else None
     collected: list[PolicyDecision] = []
     for name, fn in policies:
-        decision = _run_one(name, fn, ctx, timeout_s)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _log("policies.budget_exhausted", remaining=len(policies) - len(collected))
+                break
+            per_call = min(timeout_s, remaining)
+        else:
+            per_call = timeout_s
+        decision = _run_one(name, fn, ctx, per_call)
         if decision is None:
             continue
         collected.append(decision)
-        if decision.action in ("deny", "ask"):
+        if decision.action == "deny":
             break
     return compose(collected)

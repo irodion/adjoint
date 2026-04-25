@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from adjoint.policies.loader import compose, discover_policies, run_policies
 from adjoint.policies.types import PolicyDecision, ToolUseContext
 
@@ -288,11 +290,14 @@ def test_run_policies_short_circuits_on_deny(
     assert elapsed < 0.3, f"expected near-immediate return, got {elapsed:.3f}s"
 
 
-def test_run_policies_short_circuits_on_ask(
+def test_run_policies_does_not_short_circuit_on_ask(
     tmp_path: Path, project_dir: Path, adjoint_home: Path
 ) -> None:
-    """An ask is decisive enough to short-circuit too — surfacing it beats
-    risking the outer hook deadline that would silently fail-open."""
+    """A later deny must override an earlier ask — compose rule is deny > ask.
+
+    Short-circuiting on ask would silently downgrade a deny to a confirm
+    prompt, contradicting the documented compose contract.
+    """
     _write(
         tmp_path / "a_ask.py",
         """
@@ -302,21 +307,80 @@ def test_run_policies_short_circuits_on_ask(
         """,
     )
     _write(
-        tmp_path / "b_slow.py",
+        tmp_path / "b_deny.py",
         """
-        import time
         from adjoint.policies.types import PolicyDecision
         def decide(ctx):
-            time.sleep(0.4)
-            return PolicyDecision(action="allow")
+            return PolicyDecision(action="deny", reason="absolute no")
         """,
     )
     policies = discover_policies(tmp_path)
-    t0 = time.monotonic()
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=500)
+    assert decision.action == "deny"
+    assert decision.reason == "absolute no"
+
+
+def test_run_policies_total_budget_caps_run(
+    tmp_path: Path, project_dir: Path, adjoint_home: Path
+) -> None:
+    """``total_budget_s`` bounds the entire run, not just each policy.
+
+    Without the budget the outer hook's 2 s SIGALRM could fire mid-loop and
+    fail-open. With the budget, the loop bails before spending the per-policy
+    timeout on later policies.
+    """
+    for n in ("a_slow", "b_slow", "c_slow"):
+        _write(
+            tmp_path / f"{n}.py",
+            """
+            import time
+            from adjoint.policies.types import PolicyDecision
+            def decide(ctx):
+                time.sleep(0.4)
+                return PolicyDecision(action="allow")
+            """,
+        )
+    policies = discover_policies(tmp_path)
+    t0 = time.monotonic()
+    decision = run_policies(_ctx(project_dir), policies, timeout_ms=500, total_budget_s=0.3)
     elapsed = time.monotonic() - t0
-    assert decision.action == "ask"
-    assert elapsed < 0.3
+    assert decision.action == "allow"
+    # Without the budget this would run ~1.2 s (3 × 0.4 s).
+    assert elapsed < 0.5, f"budget should cap to ~0.3s, got {elapsed:.3f}s"
+
+
+def test_run_policies_resilient_to_logger_failure(
+    tmp_path: Path,
+    project_dir: Path,
+    adjoint_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery + execution continue even when the log file isn't writable.
+
+    Read-only homes / sandboxed CI / restricted containers can make
+    ``configure()`` raise OSError. Without the ``_log`` wrapper the
+    exception bubbles up, the hook's outer try/except treats it as
+    fail-open, and every policy is silently disabled.
+    """
+    from adjoint.policies import loader
+
+    def _boom(_name: str) -> object:
+        raise OSError("logs read-only")
+
+    monkeypatch.setattr(loader, "get_logger", _boom)
+    _write(
+        tmp_path / "deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="ok")
+        """,
+    )
+    _write(tmp_path / "broken.py", "raise RuntimeError('boom')\n")
+    policies = loader.discover_policies(tmp_path)
+    assert [n for n, _ in policies] == ["deny"]
+    decision = loader.run_policies(_ctx(project_dir), policies, timeout_ms=500)
+    assert decision.action == "deny"
 
 
 def test_run_policies_bad_return_is_allow(
