@@ -105,3 +105,26 @@ def test_tail_errors_when_db_missing(adjoint_home: Path) -> None:
     result = runner.invoke(app, ["events", "tail"])
     assert result.exit_code == 1
     assert "adjoint install" in result.output
+
+
+def test_tail_errors_when_events_table_missing(adjoint_home: Path) -> None:
+    """File present but no migrations run → friendly hint, not OperationalError.
+
+    Reproduces the partial-install path where ``adjoint-hook-post-tool-use``
+    created ``events.db`` via ``sqlite3.connect`` but the schema was never
+    applied.
+    """
+    from adjoint.cli import app
+    from adjoint.store.sqlite import connect
+
+    # Create the file with no tables (mirrors what connect() does on first
+    # call before run_migrations).
+    conn = connect()
+    conn.close()
+    assert (adjoint_home / "events.db").is_file()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["events", "tail"])
+    assert result.exit_code == 1
+    assert "events table missing" in result.output
+    assert "adjoint install" in result.output

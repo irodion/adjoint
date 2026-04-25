@@ -449,7 +449,19 @@ def events_tail(
         raise typer.Exit(1) from exc
 
     try:
-        rows = list(conn.execute(head_sql, (*args, max(n, 1))))
+        try:
+            rows = list(conn.execute(head_sql, (*args, max(n, 1))))
+        except sqlite3.OperationalError as exc:
+            # File is present but the events table isn't — partial install or a
+            # post_tool_use insert that ran before migrations created the DB.
+            # Surface the same friendly hint as the missing-file branch.
+            if "no such table" in str(exc).lower():
+                err_console.print(
+                    "[yellow]events table missing — run "
+                    "[bold]adjoint install[/bold] to (re)apply migrations.[/yellow]"
+                )
+                raise typer.Exit(1) from exc
+            raise
         rows.reverse()
         _render_events_table(rows)
 

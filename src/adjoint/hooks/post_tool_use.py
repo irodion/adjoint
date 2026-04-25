@@ -52,9 +52,12 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     if not load_config(hook_input.cwd).audit.enabled:
         return None
     raw = hook_input.raw
+    # ``tool_input`` for Write / Edit / MultiEdit carries the full file body or
+    # patch text, which we deliberately do NOT want verbatim in the audit DB
+    # (size + secret leakage). Same trimmer the response uses.
     payload = {
         "tool_name": raw.get("tool_name"),
-        "tool_input": raw.get("tool_input"),
+        "tool_input": _summarize_response(raw.get("tool_input")),
         "tool_response": _summarize_response(raw.get("tool_response")),
         "duration_ms": raw.get("duration_ms"),
     }

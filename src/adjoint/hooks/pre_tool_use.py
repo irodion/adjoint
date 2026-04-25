@@ -33,20 +33,23 @@ _DEFAULT_REASON = {
 _DEFAULT_DIR = PoliciesConfig.model_fields["dir"].default
 
 
-def _resolve_policies_dir(configured: str) -> Path:
+def _resolve_policies_dir(configured: str, project_cwd: Path) -> Path:
     """Map ``cfg.policies.dir`` to a real filesystem path.
 
     When ``configured`` matches the literal default in ``PoliciesConfig.dir``,
     we treat that as "user did not override" and route through
     ``user_paths().policies_enabled`` — that path honors ``ADJOINT_HOME``,
-    which a naïve ``Path(default).expanduser()`` would not. Any explicit
-    override goes through plain ``expanduser`` semantics, including the
-    edge case where a user types the default string verbatim (they get the
-    sentinel branch, which is what they wanted anyway).
+    which a naïve ``Path(default).expanduser()`` would not. Explicit overrides
+    are ``expanduser``'d; relative overrides like ``[policies] dir = "custompol"``
+    are anchored against ``project_cwd`` so the lookup doesn't depend on
+    whatever directory Claude Code happened to spawn the hook from.
     """
     if configured == _DEFAULT_DIR:
         return user_paths().policies_enabled
-    return Path(configured).expanduser()
+    expanded = Path(configured).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (project_cwd / expanded).resolve()
 
 
 def handle(hook_input: HookInput) -> dict[str, Any] | None:
@@ -55,7 +58,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
         return None
 
     cfg = load_config(cwd)
-    policies = discover_policies(_resolve_policies_dir(cfg.policies.dir))
+    policies = discover_policies(_resolve_policies_dir(cfg.policies.dir, cwd))
     if not policies:
         return None
 

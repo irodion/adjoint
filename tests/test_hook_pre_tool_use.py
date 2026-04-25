@@ -39,18 +39,28 @@ def test_resolve_policies_dir_default_honors_adjoint_home(adjoint_home: Path) ->
     from adjoint.paths import user_paths
 
     default = PoliciesConfig.model_fields["dir"].default
-    assert _resolve_policies_dir(default) == user_paths().policies_enabled
-    # And user_paths() reflects ADJOINT_HOME (the fixture pinned it to a temp dir).
-    assert str(adjoint_home) in str(_resolve_policies_dir(default))
+    assert _resolve_policies_dir(default, Path("/tmp")) == user_paths().policies_enabled
+    assert str(adjoint_home) in str(_resolve_policies_dir(default, Path("/tmp")))
 
 
-def test_resolve_policies_dir_explicit_override(tmp_path: Path) -> None:
-    """An explicit override is expanduser'd and returned verbatim."""
+def test_resolve_policies_dir_absolute_override(tmp_path: Path) -> None:
+    """Absolute override is expanduser'd and returned verbatim."""
     from adjoint.hooks.pre_tool_use import _resolve_policies_dir
 
     target = tmp_path / "custom-policies"
-    assert _resolve_policies_dir(str(target)) == target
-    assert _resolve_policies_dir("~/some-custom").is_absolute()
+    assert _resolve_policies_dir(str(target), Path("/somewhere/else")) == target
+    assert _resolve_policies_dir("~/some-custom", Path("/tmp")).is_absolute()
+
+
+def test_resolve_policies_dir_relative_anchored_to_project(tmp_path: Path) -> None:
+    """Relative override resolves against the project cwd, not the hook's cwd."""
+    from adjoint.hooks.pre_tool_use import _resolve_policies_dir
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    resolved = _resolve_policies_dir("custompol", project)
+    assert resolved == (project / "custompol").resolve()
+    assert resolved.is_absolute()
 
 
 def test_no_policies_dir_is_passthrough(project_dir: Path, run_hook_bin) -> None:
@@ -173,6 +183,28 @@ def test_configured_policies_dir_is_honored(
     out = json.loads(cp.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert out["hookSpecificOutput"]["permissionDecisionReason"] == "from custom dir"
+
+
+def test_relative_policies_dir_anchors_to_project(project_dir: Path, run_hook_bin) -> None:
+    """``[policies] dir = "custompol"`` resolves under the project, not the hook cwd."""
+    _write(
+        project_dir / "custompol" / "deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="from relative dir")
+        """,
+    )
+    (project_dir / ".adjoint").mkdir()
+    (project_dir / ".adjoint" / "config.toml").write_text(
+        '[policies]\ndir = "custompol"\n',
+        encoding="utf-8",
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "from relative dir"
 
 
 def test_bundled_no_writes_outside_repo(

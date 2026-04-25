@@ -64,6 +64,32 @@ def test_post_tool_use_writes_event_row(
     assert row["payload"]["duration_ms"] == 42
 
 
+def test_post_tool_use_summarizes_long_tool_input(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """Write/Edit tool_input bodies must not land verbatim in events.db."""
+    _install(project_dir)
+    big = "secret-content " * 200  # >> _PAYLOAD_STRING_CAP
+    stdin = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(project_dir),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.txt", "content": big},
+            "tool_response": {"ok": True},
+        }
+    )
+    cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+    assert cp.returncode == 0
+    rows = _fetch_events()
+    assert len(rows) == 1
+    ti = rows[0]["payload"]["tool_input"]
+    assert ti["file_path"] == "/tmp/x.txt"
+    assert "content" not in ti, "raw content must not be persisted"
+    assert ti.get("content_len") == len(big)
+
+
 def test_post_tool_use_summarizes_long_stdout(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:
