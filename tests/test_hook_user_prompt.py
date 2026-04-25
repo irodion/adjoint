@@ -85,6 +85,34 @@ def test_empty_prompt_is_passthrough(adjoint_home: Path, project_dir: Path, run_
     assert cp.stdout == ""
 
 
+def test_enrichment_handles_articles_larger_than_read_window(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """The limited-read optimisation must still surface titles when the
+    article body dwarfs the 2 KB head buffer."""
+    from adjoint.paths import user_paths
+
+    _enable_enrich(project_dir)
+    pp = user_paths().project(project_dir)
+    pp.ensure()
+    body = "lorem ipsum " * 1000  # ≈12 KB — well past the head read window
+    write_article(
+        pp.concepts_dir / "prompt-caching.md",
+        title="Prompt Caching",
+        tags=["test"],
+        created="2026-04-01",
+        updated="2026-04-01",
+        body=body,
+    )
+    cp = run_hook_bin(
+        "adjoint-hook-user-prompt",
+        _payload(project_dir, "How does prompt caching work?"),
+    )
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert "[[concepts/prompt-caching]]" in out["hookSpecificOutput"]["additionalContext"]
+
+
 def test_enrichment_matches_short_technical_acronyms(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:

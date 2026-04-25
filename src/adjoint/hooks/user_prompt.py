@@ -145,6 +145,13 @@ _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]+")
 _MIN_TOKEN_LEN = 2
 _MAX_MATCHES = 3
 
+# Bytes read from each concept file when extracting frontmatter. The full
+# file body is irrelevant for the title-overlap heuristic — frontmatter is
+# always at the top, and 2 KB comfortably fits even articles with long tag
+# lists or many sources. A 50 KB concept article therefore costs ~2 KB of
+# I/O per prompt instead of a full read.
+_FRONTMATTER_READ_BYTES = 2048
+
 
 def _tokens(text: str) -> set[str]:
     return {tok.lower() for tok in _TOKEN_RE.findall(text) if tok.lower() not in _STOPWORDS}
@@ -159,9 +166,11 @@ def _find_related_concepts(prompt: str, concepts_dir: Path, limit: int) -> list[
         slug = md.stem
         slug_toks = {p for p in re.split(r"[-_]", slug.lower()) if len(p) >= _MIN_TOKEN_LEN}
         try:
-            text = md.read_text(encoding="utf-8")
+            with md.open("rb") as f:
+                head = f.read(_FRONTMATTER_READ_BYTES)
         except OSError:
             continue
+        text = head.decode("utf-8", errors="replace")
         fm, _ = parse_frontmatter(text)
         title_toks = _tokens(fm.get("title", ""))
         # Slug hits count double — filename encodes the canonical topic.

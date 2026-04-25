@@ -473,7 +473,16 @@ def events_tail(
         try:
             while True:
                 time.sleep(0.5)
-                for row in conn.execute(follow_sql, (last_id, *args)):
+                try:
+                    new_rows = list(conn.execute(follow_sql, (last_id, *args)))
+                except sqlite3.OperationalError as exc:
+                    # Transient: DB momentarily locked, schema applied mid-
+                    # tail, etc. Back off and retry rather than crashing the
+                    # follow loop with a stack trace.
+                    err_console.print(f"[yellow]events tail: {exc}; retrying…[/yellow]")
+                    time.sleep(0.5)
+                    continue
+                for row in new_rows:
                     _render_events_line(row)
                     last_id = row["id"]
         except KeyboardInterrupt:
