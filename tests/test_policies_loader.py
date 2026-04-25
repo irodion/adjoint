@@ -250,6 +250,75 @@ def test_run_policies_exception_is_allow(
     assert decision.action == "allow"
 
 
+def test_run_policies_short_circuits_on_deny(
+    tmp_path: Path, project_dir: Path, adjoint_home: Path
+) -> None:
+    """An early deny must win without waiting on later slow allow policies.
+
+    A naïve sequential walk would run all five policies (4 × 0.4 s = 1.6 s),
+    pushing past the 2 s outer hook deadline and letting fail-open silently
+    promote the deny to allow. The short-circuit returns immediately.
+    """
+    _write(
+        tmp_path / "a_deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="early")
+        """,
+    )
+    for name in ("b_slow", "c_slow", "d_slow", "e_slow"):
+        _write(
+            tmp_path / f"{name}.py",
+            """
+            import time
+            from adjoint.policies.types import PolicyDecision
+            def decide(ctx):
+                time.sleep(0.4)
+                return PolicyDecision(action="allow")
+            """,
+        )
+    policies = discover_policies(tmp_path)
+    t0 = time.monotonic()
+    decision = run_policies(_ctx(project_dir), policies, timeout_ms=500)
+    elapsed = time.monotonic() - t0
+    assert decision.action == "deny"
+    assert decision.reason == "early"
+    # Returned without waiting on the four slow allows.
+    assert elapsed < 0.3, f"expected near-immediate return, got {elapsed:.3f}s"
+
+
+def test_run_policies_short_circuits_on_ask(
+    tmp_path: Path, project_dir: Path, adjoint_home: Path
+) -> None:
+    """An ask is decisive enough to short-circuit too — surfacing it beats
+    risking the outer hook deadline that would silently fail-open."""
+    _write(
+        tmp_path / "a_ask.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="ask", reason="confirm")
+        """,
+    )
+    _write(
+        tmp_path / "b_slow.py",
+        """
+        import time
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            time.sleep(0.4)
+            return PolicyDecision(action="allow")
+        """,
+    )
+    policies = discover_policies(tmp_path)
+    t0 = time.monotonic()
+    decision = run_policies(_ctx(project_dir), policies, timeout_ms=500)
+    elapsed = time.monotonic() - t0
+    assert decision.action == "ask"
+    assert elapsed < 0.3
+
+
 def test_run_policies_bad_return_is_allow(
     tmp_path: Path, project_dir: Path, adjoint_home: Path
 ) -> None:

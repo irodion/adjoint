@@ -159,11 +159,22 @@ def run_policies(
     policies: list[tuple[str, PolicyFn]],
     timeout_ms: int,
 ) -> PolicyDecision:
-    """Run every policy with ``timeout_ms`` each, compose the surviving results."""
+    """Run policies sequentially with ``timeout_ms`` each, compose the result.
+
+    Short-circuits on the first decisive (``deny`` or ``ask``) result. Without
+    this, a fast deny followed by several slow allows would push past the
+    outer PreToolUse 2 s deadline — the SIGALRM in ``run_hook`` would fire
+    inside this loop, skipping ``compose`` and letting fail-open silently
+    promote the tool call to allow. Surfacing the decisive result we already
+    have always beats losing it to a timeout.
+    """
     timeout_s = max(timeout_ms / 1000.0, 0.001)
     collected: list[PolicyDecision] = []
     for name, fn in policies:
         decision = _run_one(name, fn, ctx, timeout_s)
-        if decision is not None:
-            collected.append(decision)
+        if decision is None:
+            continue
+        collected.append(decision)
+        if decision.action in ("deny", "ask"):
+            break
     return compose(collected)

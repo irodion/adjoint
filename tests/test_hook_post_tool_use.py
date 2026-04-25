@@ -115,6 +115,48 @@ def test_post_tool_use_summarizes_long_stdout(
     assert tr["stderr"] == ""
 
 
+def test_post_tool_use_summarizes_nested_multiedit_payload(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """MultiEdit's tool_input nests long strings inside ``edits`` list of dicts.
+
+    Without recursive summarization the long old_string/new_string bodies
+    landed verbatim in events.db.
+    """
+    _install(project_dir)
+    big = "secret-old-content " * 200  # >> _PAYLOAD_STRING_CAP
+    stdin = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(project_dir),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "MultiEdit",
+            "tool_input": {
+                "file_path": "/tmp/x.txt",
+                "edits": [
+                    {"old_string": big, "new_string": big},
+                    {"old_string": "short", "new_string": "also short"},
+                ],
+            },
+            "tool_response": {"ok": True},
+        }
+    )
+    cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+    assert cp.returncode == 0
+    rows = _fetch_events()
+    assert len(rows) == 1
+    edits = rows[0]["payload"]["tool_input"]["edits"]
+    assert len(edits) == 2
+    # First edit: long bodies replaced with *_len keys.
+    assert edits[0].get("old_string_len") == len(big)
+    assert edits[0].get("new_string_len") == len(big)
+    assert "old_string" not in edits[0]
+    assert "new_string" not in edits[0]
+    # Second edit: short bodies preserved.
+    assert edits[1]["old_string"] == "short"
+    assert edits[1]["new_string"] == "also short"
+
+
 def test_summarize_response_handles_str_and_list() -> None:
     from adjoint.hooks.post_tool_use import _PAYLOAD_STRING_CAP, _summarize_response
 

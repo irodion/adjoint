@@ -27,17 +27,19 @@ _PAYLOAD_STRING_CAP = 256
 def _summarize_response(tool_response: Any) -> Any:
     """Trim bulky payloads before storing them in events.db.
 
-    Long strings (>_PAYLOAD_STRING_CAP) collapse to ``{"_value_len": N}`` so a
-    multi-megabyte tool stdout doesn't bloat the audit table — the transcript
-    already has the full text. Dict values follow the same rule keyed as
-    ``<k>_len``. Lists are mapped element-wise so list-of-dicts payloads
-    (e.g. Glob results) stay summarised.
+    Long strings (>_PAYLOAD_STRING_CAP) collapse to ``<k>_len`` (in dicts) or
+    ``{"_value_len": N}`` (bare). Dict / list children recurse so nested
+    payloads — e.g. MultiEdit's ``{"edits": [{"old_string": ..., "new_string":
+    ...}]}`` — are also trimmed. The transcript already has the full text, so
+    there's no audit value in duplicating it here, only privacy and size cost.
     """
     if isinstance(tool_response, dict):
         out: dict[str, Any] = {}
         for k, v in tool_response.items():
             if isinstance(v, str) and len(v) > _PAYLOAD_STRING_CAP:
                 out[f"{k}_len"] = len(v)
+            elif isinstance(v, (dict, list)):
+                out[k] = _summarize_response(v)
             else:
                 out[k] = v
         return out
