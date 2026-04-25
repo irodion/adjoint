@@ -18,7 +18,7 @@ from typing import Any
 
 from ..config import load_config
 from ..memory._shared import parse_frontmatter
-from ..paths import user_paths
+from ..paths import find_project_root, user_paths
 from ._runtime import HookInput, run_hook
 
 _STOPWORDS = frozenset(
@@ -101,7 +101,12 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     cwd = hook_input.cwd
     if not cwd:
         return None
-    cfg = load_config(cwd)
+    # Project KB lives at the repo root, regardless of where Claude was
+    # launched. ``project_hash`` of <repo>/subdir would key a different,
+    # empty project directory — losing all prompt enrichment for nested
+    # sessions.
+    project_root = find_project_root(cwd)
+    cfg = load_config(project_root)
     if not cfg.memory.enrich_prompts:
         return None
 
@@ -109,7 +114,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     if not prompt:
         return None
 
-    pp = user_paths().project(cwd)
+    pp = user_paths().project(project_root)
     if not pp.concepts_dir.is_dir():
         return None
 

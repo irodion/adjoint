@@ -185,6 +185,35 @@ def test_configured_policies_dir_is_honored(
     assert out["hookSpecificOutput"]["permissionDecisionReason"] == "from custom dir"
 
 
+def test_pretooluse_finds_repo_config_from_subdir(project_dir: Path, run_hook_bin) -> None:
+    """Hook launched from <repo>/sub/dir must still pick up repo-root policies.
+
+    Without ``find_project_root``, ``load_config(<sub>)`` and
+    ``_resolve_policies_dir`` would miss the project's config and policies
+    silently — the deny would never fire.
+    """
+    _write(
+        project_dir / "custompol" / "deny.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="repo-rooted")
+        """,
+    )
+    (project_dir / ".adjoint").mkdir()
+    (project_dir / ".adjoint" / "config.toml").write_text(
+        '[policies]\ndir = "custompol"\n',
+        encoding="utf-8",
+    )
+    nested = project_dir / "sub" / "dir"
+    nested.mkdir(parents=True)
+    cp = run_hook_bin(HOOK_BIN, _payload(nested, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "repo-rooted"
+
+
 def test_relative_policies_dir_anchors_to_project(project_dir: Path, run_hook_bin) -> None:
     """``[policies] dir = "custompol"`` resolves under the project, not the hook cwd."""
     _write(
@@ -297,3 +326,14 @@ def test_bundled_no_writes_outside_repo(
     cp3 = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": "inside.txt"}))
     assert cp3.returncode == 0
     assert cp3.stdout == "", "relative path inside repo should be allowed"
+
+    # Nested launch: even when Claude starts in <repo>/sub/dir, a write to
+    # <repo>/rootfile.txt is still in-repo and must be allowed. Without the
+    # find_project_root walk-up, ctx.cwd would be the subdir and rootfile
+    # would be flagged as outside.
+    nested = project_dir / "sub" / "dir"
+    nested.mkdir(parents=True, exist_ok=True)
+    rootfile = project_dir / "rootfile.txt"
+    cp4 = run_hook_bin(HOOK_BIN, _payload(nested, "Write", {"file_path": str(rootfile)}))
+    assert cp4.returncode == 0
+    assert cp4.stdout == "", "write to <repo>/rootfile.txt from nested cwd must be allowed"

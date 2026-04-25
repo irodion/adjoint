@@ -36,6 +36,10 @@ class ToolUseContext:
     # tuples — policies that do ``isinstance(x, list)`` need to allow
     # ``Sequence`` instead, but iteration / indexing / ``len`` still work.
     tool_input: Mapping[str, Any]
+    # Project root, not the literal session cwd. ``pre_tool_use`` walks up from
+    # the hook payload's cwd to the nearest ``.adjoint/`` or ``.git`` so
+    # repo-boundary policies (``no_writes_outside_repo``) work for nested
+    # sessions launched from ``<repo>/subdir/``.
     cwd: Path
     session_id: str | None
     transcript_path: Path | None

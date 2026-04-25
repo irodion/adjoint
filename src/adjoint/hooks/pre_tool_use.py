@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import PoliciesConfig, load_config
-from ..paths import user_paths
+from ..paths import find_project_root, user_paths
 from ..policies.loader import discover_policies, run_policies
 from ..policies.types import ToolUseContext, freeze_tool_input
 from ._runtime import HookInput, run_hook
@@ -62,8 +62,12 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     if not cwd:
         return None
 
-    cfg = load_config(cwd)
-    policies = discover_policies(_resolve_policies_dir(cfg.policies.dir, cwd))
+    # Hooks may launch from <repo>/subdir; everything keyed on "the project"
+    # — config, policies dir, repo-boundary checks — must use the actual
+    # root, not the literal session cwd.
+    project_root = find_project_root(cwd)
+    cfg = load_config(project_root)
+    policies = discover_policies(_resolve_policies_dir(cfg.policies.dir, project_root))
     if not policies:
         return None
 
@@ -71,7 +75,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     ctx = ToolUseContext(
         tool_name=str(raw.get("tool_name", "")),
         tool_input=freeze_tool_input(raw.get("tool_input", {}) or {}),
-        cwd=cwd,
+        cwd=project_root,
         session_id=hook_input.session_id,
         transcript_path=hook_input.transcript_path,
     )

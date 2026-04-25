@@ -83,3 +83,27 @@ def test_empty_prompt_is_passthrough(adjoint_home: Path, project_dir: Path, run_
     cp = run_hook_bin("adjoint-hook-user-prompt", _payload(project_dir, ""))
     assert cp.returncode == 0
     assert cp.stdout == ""
+
+
+def test_enrichment_finds_kb_from_nested_cwd(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """Sessions launched in <repo>/sub must still pick up the repo's KB.
+
+    Without ``find_project_root``, ``project_hash(<repo>/sub)`` would key a
+    different, empty project and enrichment would silently produce no
+    context. The ``.adjoint/`` dir created by ``_enable_enrich`` serves as
+    the project-root marker.
+    """
+    _enable_enrich(project_dir)
+    _seed_concept(project_dir, "prompt-caching", "Prompt Caching")
+    nested = project_dir / "sub" / "deep"
+    nested.mkdir(parents=True)
+    cp = run_hook_bin(
+        "adjoint-hook-user-prompt",
+        _payload(nested, "How does prompt caching work?"),
+    )
+    assert cp.returncode == 0
+    assert cp.stdout != ""
+    out = json.loads(cp.stdout)
+    assert "[[concepts/prompt-caching]]" in out["hookSpecificOutput"]["additionalContext"]

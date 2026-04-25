@@ -18,6 +18,7 @@ from typing import Any
 
 from ..config import load_config
 from ..log import get_logger, log_event
+from ..paths import find_project_root
 from ..store.sqlite import connect
 from ._runtime import HookInput, run_hook
 
@@ -68,7 +69,10 @@ def _summarize_response(tool_response: Any) -> Any:
 
 
 def handle(hook_input: HookInput) -> dict[str, Any] | None:
-    if not load_config(hook_input.cwd).audit.enabled:
+    # Hook cwd may be <repo>/subdir; the project's audit opt-out lives in the
+    # repo root's .adjoint/config.toml.
+    project_root = find_project_root(hook_input.cwd) if hook_input.cwd else None
+    if not load_config(project_root).audit.enabled:
         return None
     raw = hook_input.raw
     # ``tool_input`` for Write / Edit / MultiEdit carries the full file body or

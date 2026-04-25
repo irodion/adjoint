@@ -273,6 +273,33 @@ def test_post_tool_use_respects_audit_disabled(
     assert _fetch_events() == []
 
 
+def test_post_tool_use_audit_disabled_from_nested_cwd(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """``[audit] enabled = false`` at the repo root must work for subdir launches."""
+    _install(project_dir)
+    (project_dir / ".adjoint").mkdir()
+    (project_dir / ".adjoint" / "config.toml").write_text(
+        "[audit]\nenabled = false\n",
+        encoding="utf-8",
+    )
+    nested = project_dir / "sub" / "deep"
+    nested.mkdir(parents=True)
+    stdin = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(nested),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": {"exit_code": 0},
+        }
+    )
+    cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+    assert cp.returncode == 0
+    assert _fetch_events() == [], "audit opt-out must apply to nested launches"
+
+
 def test_post_tool_use_missing_db_is_noop(project_dir: Path, run_hook_bin) -> None:
     # No install → no events.db table. Hook must still exit 0.
     stdin = json.dumps(

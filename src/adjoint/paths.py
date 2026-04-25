@@ -33,6 +33,32 @@ def project_hash(project_path: Path | str) -> str:
     return digest[:12]
 
 
+# Markers that identify a project root. ``.adjoint/`` is our own per-project
+# config dir; ``.claude/`` is Claude Code's per-project settings dir (always
+# present after ``adjoint install --project``); ``.git`` is the universal
+# repo marker (file in worktrees / submodules, directory otherwise). The
+# closest ancestor containing any of them wins; fall back to the start path
+# if nothing matches.
+_PROJECT_ROOT_MARKERS = (".adjoint", ".claude", ".git")
+
+
+def find_project_root(start: Path | str) -> Path:
+    """Walk up from ``start`` to find the enclosing project root.
+
+    Claude Code launches hooks with ``cwd`` set to wherever the user started
+    the session — which can be ``<repo>/subdir/`` rather than the repo root.
+    Anything keyed on the project root (``load_config``, ``user_paths().project``,
+    repo-boundary policies) needs the actual root, not the literal cwd.
+    Returns ``start`` when no marker is found, so behaviour outside a project
+    layout falls back to "treat the launch dir as the project".
+    """
+    here = Path(start).expanduser().resolve()
+    for d in (here, *here.parents):
+        if any((d / m).exists() for m in _PROJECT_ROOT_MARKERS):
+            return d
+    return here
+
+
 @dataclass(frozen=True)
 class UserPaths:
     root: Path
