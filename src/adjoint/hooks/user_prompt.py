@@ -23,6 +23,79 @@ from ._runtime import HookInput, run_hook
 
 _STOPWORDS = frozenset(
     {
+        # 2–3 char common English words. Required because ``_TOKEN_RE`` now
+        # accepts 2+ char tokens — otherwise "the" / "and" / "for" would
+        # leak into prompt and slug token sets and create noise.
+        "an",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "go",
+        "he",
+        "if",
+        "in",
+        "is",
+        "it",
+        "me",
+        "my",
+        "no",
+        "of",
+        "on",
+        "or",
+        "so",
+        "to",
+        "up",
+        "us",
+        "we",
+        "the",
+        "and",
+        "for",
+        "are",
+        "you",
+        "but",
+        "not",
+        "all",
+        "can",
+        "had",
+        "her",
+        "his",
+        "its",
+        "our",
+        "out",
+        "she",
+        "him",
+        "any",
+        "one",
+        "two",
+        "now",
+        "way",
+        "how",
+        "why",
+        "who",
+        "did",
+        "get",
+        "got",
+        "let",
+        "may",
+        "set",
+        "too",
+        "say",
+        "see",
+        "yes",
+        "off",
+        "old",
+        "new",
+        "yet",
+        "own",
+        "ago",
+        "few",
+        "via",
+        "etc",
+        # 4+ char (kept as-is). Tools-of-the-trade like ``MCP`` / ``WAL`` /
+        # ``CLI`` / ``uv`` are deliberately *not* here so they can still
+        # match concept slugs and titles.
         "this",
         "that",
         "these",
@@ -67,7 +140,9 @@ _STOPWORDS = frozenset(
         "many",
     }
 )
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{3,}")
+# 2+ chars so short technical acronyms — MCP, CLI, SDK, WAL, uv — match.
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]+")
+_MIN_TOKEN_LEN = 2
 _MAX_MATCHES = 3
 
 
@@ -82,7 +157,7 @@ def _find_related_concepts(prompt: str, concepts_dir: Path, limit: int) -> list[
     scored: list[tuple[int, str]] = []
     for md in concepts_dir.glob("*.md"):
         slug = md.stem
-        slug_toks = {p for p in re.split(r"[-_]", slug.lower()) if len(p) >= 4}
+        slug_toks = {p for p in re.split(r"[-_]", slug.lower()) if len(p) >= _MIN_TOKEN_LEN}
         try:
             text = md.read_text(encoding="utf-8")
         except OSError:

@@ -85,6 +85,36 @@ def test_empty_prompt_is_passthrough(adjoint_home: Path, project_dir: Path, run_
     assert cp.stdout == ""
 
 
+def test_enrichment_matches_short_technical_acronyms(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """Acronyms like MCP / WAL / uv are common concept titles in this codebase.
+
+    The previous 4-char minimum filtered them out entirely so enrichment
+    silently produced no matches for the most relevant entries.
+    """
+    _enable_enrich(project_dir)
+    _seed_concept(project_dir, "mcp-tools", "MCP Tools")
+    _seed_concept(project_dir, "wal-mode", "WAL Mode")
+    _seed_concept(project_dir, "uv-install", "uv install")
+
+    cp = run_hook_bin(
+        "adjoint-hook-user-prompt",
+        _payload(project_dir, "How does MCP work?"),
+    )
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert "[[concepts/mcp-tools]]" in out["hookSpecificOutput"]["additionalContext"]
+
+    cp2 = run_hook_bin(
+        "adjoint-hook-user-prompt",
+        _payload(project_dir, "Run uv install on the project"),
+    )
+    assert cp2.returncode == 0
+    out2 = json.loads(cp2.stdout)
+    assert "[[concepts/uv-install]]" in out2["hookSpecificOutput"]["additionalContext"]
+
+
 def test_enrichment_finds_kb_from_nested_cwd(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:

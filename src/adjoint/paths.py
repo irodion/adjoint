@@ -49,11 +49,21 @@ def find_project_root(start: Path | str) -> Path:
     the session — which can be ``<repo>/subdir/`` rather than the repo root.
     Anything keyed on the project root (``load_config``, ``user_paths().project``,
     repo-boundary policies) needs the actual root, not the literal cwd.
-    Returns ``start`` when no marker is found, so behaviour outside a project
-    layout falls back to "treat the launch dir as the project".
+
+    The walk-up stops at ``Path.home()`` exclusive: ``~/.adjoint/`` and
+    ``~/.claude/`` exist globally after install, so without this guard a
+    session started in any subdirectory of HOME would resolve to HOME itself
+    as the "project". Sessions outside HOME (``/tmp``, ``/srv``) walk all the
+    way up. Returns ``start`` when no marker is found below HOME.
     """
     here = Path(start).expanduser().resolve()
+    try:
+        home = Path.home().resolve()
+    except RuntimeError:
+        home = None
     for d in (here, *here.parents):
+        if home is not None and d == home:
+            break
         if any((d / m).exists() for m in _PROJECT_ROOT_MARKERS):
             return d
     return here
