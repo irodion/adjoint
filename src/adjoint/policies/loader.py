@@ -58,6 +58,57 @@ def _on_sys_path(path: Path) -> Iterator[None]:
             sys.path.remove(entry)
 
 
+# Per-policy import budget. A policy that blocks at module top-level
+# (``import time; time.sleep(5)``) would otherwise hang ``exec_module``
+# until the outer 2 s hook SIGALRM fires, skipping every other policy and
+# fail-opening the call. 1 s is generous for legitimate imports while
+# still leaving room for the outer deadline if multiple policies misbehave.
+_IMPORT_TIMEOUT_S = 1.0
+
+
+def _import_module_with_timeout(
+    spec: importlib.machinery.ModuleSpec,
+    module: Any,
+    label: str,
+    timeout_s: float,
+) -> bool:
+    """Run ``spec.loader.exec_module(module)`` on a daemon thread with a deadline.
+
+    Returns True iff the import completed in time and raised nothing. The
+    daemon thread is left running on timeout — the hook process exits soon
+    enough that the leak doesn't matter, and aborting an executing import
+    cleanly isn't possible without process-level controls.
+    """
+    # Caller has already verified ``spec.loader is not None``; bind to a
+    # local so mypy is happy without a runtime assert (which Bandit flags).
+    loader = spec.loader
+    if loader is None:  # pragma: no cover — defence in depth
+        return False
+    error: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            loader.exec_module(module)
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+
+    t = threading.Thread(target=_target, name=f"adjoint-policy-import-{label}", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        _log("policy.import.timeout", path=label, timeout_s=timeout_s)
+        return False
+    if error:
+        _log(
+            "policy.import.error",
+            path=label,
+            error=str(error[0]),
+            traceback="".join(traceback.format_exception(error[0])),
+        )
+        return False
+    return True
+
+
 def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
     """Import every ``*.py`` in ``policies_dir`` (skipping ``_*.py``).
 
@@ -65,7 +116,9 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
     deterministic. Policies may import sibling helpers at module top-level
     (e.g. ``from _helper import RULES``); ``policies_dir`` is temporarily
     prepended to ``sys.path`` during discovery to make that resolution work.
-    Modules that fail to import or lack a ``decide`` callable are logged and
+    Each module's ``exec_module`` runs with a wall-clock deadline so a
+    blocking top-level import doesn't stall the entire hook. Modules that
+    fail to import, time out, or lack a ``decide`` callable are logged and
     omitted.
     """
     if not policies_dir.is_dir():
@@ -78,27 +131,22 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
             mod_name = f"adjoint_policy_{path.stem}"
             try:
                 spec = importlib.util.spec_from_file_location(mod_name, path)
-                if spec is None or spec.loader is None:
-                    _log("policy.import.skip", path=str(path), reason="no-spec")
-                    continue
-                module = importlib.util.module_from_spec(spec)
-                # Register before ``exec_module`` so the policy can reference
-                # itself (e.g., dataclasses' ``__module__`` lookup) and so
-                # circular imports between sibling policy files terminate.
-                # Standard pattern from importlib docs.
-                sys.modules[mod_name] = module
-                try:
-                    spec.loader.exec_module(module)
-                except Exception:
-                    sys.modules.pop(mod_name, None)
-                    raise
-            except Exception as exc:  # noqa: BLE001 — fail-open on import error
-                _log(
-                    "policy.import.error",
-                    path=str(path),
-                    error=str(exc),
-                    traceback=traceback.format_exc(),
-                )
+            except Exception as exc:  # noqa: BLE001
+                _log("policy.import.error", path=str(path), error=str(exc))
+                continue
+            if spec is None or spec.loader is None:
+                _log("policy.import.skip", path=str(path), reason="no-spec")
+                continue
+            module = importlib.util.module_from_spec(spec)
+            # Register before ``exec_module`` so the policy can reference
+            # itself (e.g., dataclasses' ``__module__`` lookup) and so
+            # circular imports between sibling policy files terminate.
+            # Standard pattern from importlib docs.
+            sys.modules[mod_name] = module
+            if not _import_module_with_timeout(
+                spec, module, str(path), timeout_s=_IMPORT_TIMEOUT_S
+            ):
+                sys.modules.pop(mod_name, None)
                 continue
             decide = getattr(module, "decide", None)
             if not callable(decide):
@@ -155,14 +203,26 @@ def _run_one(
 
 
 def compose(decisions: list[PolicyDecision]) -> PolicyDecision:
-    """First deny wins; otherwise first ask; otherwise allow."""
+    """Pick the strongest signal: deny > ask > allow > defer.
+
+    Empty input or input made entirely of reserved values (``modify`` /
+    ``defer``) produces ``defer`` — the "no decisive opinion" sentinel. The
+    PreToolUse hook treats ``defer`` as fall-through (don't emit a
+    ``permissionDecision``), which lets Claude Code's normal permission flow
+    proceed. ``allow`` is reserved for the case where at least one policy
+    *explicitly* approved the call, so we can proactively skip the normal
+    user-confirm UI for tools that would otherwise prompt.
+    """
     for d in decisions:
         if d.action == "deny":
             return d
     for d in decisions:
         if d.action == "ask":
             return d
-    return PolicyDecision(action="allow")
+    for d in decisions:
+        if d.action == "allow":
+            return d
+    return PolicyDecision(action="defer")
 
 
 def run_policies(

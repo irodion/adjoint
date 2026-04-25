@@ -30,8 +30,14 @@ def _write(path: Path, body: str) -> None:
 # ── compose ──────────────────────────────────────────────────────────────
 
 
-def test_compose_empty_is_allow() -> None:
-    assert compose([]).action == "allow"
+def test_compose_empty_is_defer() -> None:
+    """No decisions = no opinion = ``defer`` (the hook treats this as fall-through).
+
+    The previous contract returned ``allow`` here, but ``allow`` now means
+    "explicitly approved" and triggers a proactive approval in the hook —
+    which is wrong for the empty case.
+    """
+    assert compose([]).action == "defer"
 
 
 def test_compose_first_deny_wins() -> None:
@@ -60,10 +66,19 @@ def test_compose_ask_beats_allow_but_not_deny() -> None:
     assert denied.action == "deny"
 
 
-def test_compose_modify_and_defer_collapse_to_allow() -> None:
-    # M2 treats both reserved actions as allow when they're the only decisions.
-    assert compose([PolicyDecision(action="modify")]).action == "allow"
-    assert compose([PolicyDecision(action="defer")]).action == "allow"
+def test_compose_reserved_actions_collapse_to_defer() -> None:
+    # ``modify``/``defer`` aren't decisive; the composed result is also
+    # ``defer`` so the hook falls through rather than proactively approving.
+    assert compose([PolicyDecision(action="modify")]).action == "defer"
+    assert compose([PolicyDecision(action="defer")]).action == "defer"
+
+
+def test_compose_explicit_allow_wins_over_reserved() -> None:
+    """An explicit allow beats reserved values — that's the whole reason
+    explicit allow exists as a distinct outcome."""
+    assert (
+        compose([PolicyDecision(action="modify"), PolicyDecision(action="allow")]).action == "allow"
+    )
 
 
 # ── discover_policies ───────────────────────────────────────────────────
@@ -213,7 +228,7 @@ def test_run_policies_composes_deny(tmp_path: Path, project_dir: Path, adjoint_h
     assert decision.reason == "nope"
 
 
-def test_run_policies_timeout_is_allow(
+def test_run_policies_timeout_falls_through(
     tmp_path: Path, project_dir: Path, adjoint_home: Path
 ) -> None:
     _write(
@@ -230,13 +245,15 @@ def test_run_policies_timeout_is_allow(
     t0 = time.monotonic()
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=100)
     elapsed = time.monotonic() - t0
-    assert decision.action == "allow"
+    # ``defer`` (no decisive opinion) — the deny inside the timed-out policy
+    # was discarded, and there's no other input. Hook will fall through.
+    assert decision.action == "defer"
     # Lower bound: the timeout must actually wait the budget, not skip it.
     # Upper bound: but never the full 2 s sleep the policy requested.
     assert 0.09 <= elapsed < 1.0, f"expected ~100ms wait, got {elapsed:.3f}s"
 
 
-def test_run_policies_exception_is_allow(
+def test_run_policies_exception_falls_through(
     tmp_path: Path, project_dir: Path, adjoint_home: Path
 ) -> None:
     _write(
@@ -249,7 +266,7 @@ def test_run_policies_exception_is_allow(
     )
     policies = discover_policies(tmp_path)
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=500)
-    assert decision.action == "allow"
+    assert decision.action == "defer"
 
 
 def test_run_policies_short_circuits_on_deny(
@@ -344,9 +361,36 @@ def test_run_policies_total_budget_caps_run(
     t0 = time.monotonic()
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=500, total_budget_s=0.3)
     elapsed = time.monotonic() - t0
-    assert decision.action == "allow"
+    # All policies time out under the budget cap → no collected decisions.
+    assert decision.action == "defer"
     # Without the budget this would run ~1.2 s (3 × 0.4 s).
     assert elapsed < 0.5, f"budget should cap to ~0.3s, got {elapsed:.3f}s"
+
+
+def test_discover_bounds_blocking_imports(tmp_path: Path, adjoint_home: Path) -> None:
+    """A policy that blocks at module top level must not stall discovery.
+
+    Without an exec_module timeout, ``import time; time.sleep(N)`` hangs the
+    whole hook process until the outer 2 s SIGALRM fires — and then every
+    other policy is skipped, which fail-opens the call.
+    """
+    _write(tmp_path / "a_blocks.py", "import time\ntime.sleep(10)\n")
+    _write(
+        tmp_path / "b_works.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="deny", reason="ok")
+        """,
+    )
+    t0 = time.monotonic()
+    policies = discover_policies(tmp_path)
+    elapsed = time.monotonic() - t0
+    names = [n for n, _ in policies]
+    assert "b_works" in names, "later policy must still be discovered"
+    assert "a_blocks" not in names, "blocking import must be skipped"
+    # Bounded by _IMPORT_TIMEOUT_S (1.0 s); well under the 10 s sleep.
+    assert elapsed < 2.0, f"discovery should be bounded, took {elapsed:.2f}s"
 
 
 def test_run_policies_resilient_to_logger_failure(
@@ -383,7 +427,7 @@ def test_run_policies_resilient_to_logger_failure(
     assert decision.action == "deny"
 
 
-def test_run_policies_bad_return_is_allow(
+def test_run_policies_bad_return_falls_through(
     tmp_path: Path, project_dir: Path, adjoint_home: Path
 ) -> None:
     _write(
@@ -395,7 +439,7 @@ def test_run_policies_bad_return_is_allow(
     )
     policies = discover_policies(tmp_path)
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=500)
-    assert decision.action == "allow"
+    assert decision.action == "defer"
 
 
 def test_timeout_uses_daemon_thread(tmp_path: Path, project_dir: Path, adjoint_home: Path) -> None:
@@ -420,7 +464,7 @@ def test_timeout_uses_daemon_thread(tmp_path: Path, project_dir: Path, adjoint_h
     policies = discover_policies(tmp_path)
     pre = {t.ident for t in threading.enumerate()}
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=50)
-    assert decision.action == "allow"
+    assert decision.action == "defer"
     new_threads = [t for t in threading.enumerate() if t.ident not in pre]
     assert new_threads, "expected at least one still-alive worker"
     assert all(t.daemon for t in new_threads), "policy worker must be daemon"

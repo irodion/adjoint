@@ -23,6 +23,7 @@ from ._runtime import HookInput, run_hook
 _DEFAULT_REASON = {
     "deny": "policy denied",
     "ask": "policy requests confirmation",
+    "allow": "policy approved",
 }
 
 # The literal default string in ``PoliciesConfig.dir``. Matching this exactly
@@ -83,7 +84,11 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
         ctx, policies, cfg.policies.timeout_ms, total_budget_s=_RUN_POLICIES_BUDGET_S
     )
 
-    if decision.action in ("deny", "ask"):
+    if decision.action in ("deny", "ask", "allow"):
+        # ``allow`` proactively approves the call (skipping Claude Code's
+        # normal permission UI). Falling through here would leave that flow
+        # in place, which defeats the documented intent of policies like
+        # ``safe_bash`` that allow non-dangerous Bash commands.
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -91,6 +96,8 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
                 "permissionDecisionReason": (decision.reason or _DEFAULT_REASON[decision.action]),
             }
         }
+    # ``defer`` (no decisive opinion) and reserved ``modify`` fall through
+    # to Claude Code's normal flow.
     return None
 
 

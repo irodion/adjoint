@@ -107,18 +107,50 @@ def test_ask_policy_emits_permission_ask(
     assert out["hookSpecificOutput"]["permissionDecisionReason"] == "confirm?"
 
 
-def test_allow_policy_is_passthrough(adjoint_home: Path, project_dir: Path, run_hook_bin) -> None:
+def test_allow_policy_emits_permission_allow(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """An explicit ``allow`` proactively approves the call so Claude Code
+    skips its normal user-confirm UI — that's the documented intent of
+    starter policies like ``safe_bash`` allowing non-dangerous Bash."""
     _write(
         adjoint_home / "policies" / "enabled" / "allow_all.py",
         """
         from adjoint.policies.types import PolicyDecision
         def decide(ctx):
-            return PolicyDecision(action="allow")
+            return PolicyDecision(action="allow", reason="trusted")
         """,
     )
     cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
     assert cp.returncode == 0
-    assert cp.stdout == ""
+    out = json.loads(cp.stdout)
+    hso = out["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "allow"
+    assert hso["permissionDecisionReason"] == "trusted"
+
+
+def test_no_decision_falls_through(adjoint_home: Path, project_dir: Path, run_hook_bin) -> None:
+    """Policies that all error out / return reserved actions yield no
+    decisive opinion; the hook must fall through (no ``permissionDecision``)
+    so Claude Code's normal flow runs."""
+    _write(
+        adjoint_home / "policies" / "enabled" / "broken.py",
+        """
+        def decide(ctx):
+            raise RuntimeError("boom")
+        """,
+    )
+    _write(
+        adjoint_home / "policies" / "enabled" / "deferring.py",
+        """
+        from adjoint.policies.types import PolicyDecision
+        def decide(ctx):
+            return PolicyDecision(action="defer")
+        """,
+    )
+    cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
+    assert cp.returncode == 0
+    assert cp.stdout == "", f"expected fall-through, got {cp.stdout!r}"
 
 
 def test_raising_policy_fails_open(adjoint_home: Path, project_dir: Path, run_hook_bin) -> None:
@@ -292,8 +324,12 @@ def test_tool_input_is_deep_frozen_across_policies(
     )
     cp = run_hook_bin(HOOK_BIN, payload)
     assert cp.returncode == 0
-    # Observer's deny would fire if the mutation leaked across policies.
-    assert cp.stdout == "", f"observer saw mutation: {cp.stdout!r}"
+    # Observer's deny would fire if the mutation leaked across policies; the
+    # observer's ``allow`` is now emitted explicitly when no mutation is seen.
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow", (
+        f"observer saw mutation: {cp.stdout!r}"
+    )
 
 
 def test_bundled_no_writes_outside_repo(
@@ -317,15 +353,20 @@ def test_bundled_no_writes_outside_repo(
     out = json.loads(cp.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    def _allow(stdout: str) -> None:
+        assert stdout, "expected an explicit allow JSON, got empty"
+        out = json.loads(stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
     inside = project_dir / "inside.txt"
     cp2 = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": str(inside)}))
     assert cp2.returncode == 0
-    assert cp2.stdout == ""
+    _allow(cp2.stdout)
 
     # Relative path: must be anchored against ctx.cwd, not the hook's own cwd.
     cp3 = run_hook_bin(HOOK_BIN, _payload(project_dir, "Write", {"file_path": "inside.txt"}))
     assert cp3.returncode == 0
-    assert cp3.stdout == "", "relative path inside repo should be allowed"
+    _allow(cp3.stdout)
 
     # Nested launch: even when Claude starts in <repo>/sub/dir, a write to
     # <repo>/rootfile.txt is still in-repo and must be allowed. Without the
@@ -336,4 +377,4 @@ def test_bundled_no_writes_outside_repo(
     rootfile = project_dir / "rootfile.txt"
     cp4 = run_hook_bin(HOOK_BIN, _payload(nested, "Write", {"file_path": str(rootfile)}))
     assert cp4.returncode == 0
-    assert cp4.stdout == "", "write to <repo>/rootfile.txt from nested cwd must be allowed"
+    _allow(cp4.stdout)
