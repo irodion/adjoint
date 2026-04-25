@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from ..config import PoliciesConfig, load_config
@@ -33,6 +34,16 @@ _DEFAULT_DIR = PoliciesConfig.model_fields["dir"].default
 
 
 def _resolve_policies_dir(configured: str) -> Path:
+    """Map ``cfg.policies.dir`` to a real filesystem path.
+
+    When ``configured`` matches the literal default in ``PoliciesConfig.dir``,
+    we treat that as "user did not override" and route through
+    ``user_paths().policies_enabled`` — that path honors ``ADJOINT_HOME``,
+    which a naïve ``Path(default).expanduser()`` would not. Any explicit
+    override goes through plain ``expanduser`` semantics, including the
+    edge case where a user types the default string verbatim (they get the
+    sentinel branch, which is what they wanted anyway).
+    """
     if configured == _DEFAULT_DIR:
         return user_paths().policies_enabled
     return Path(configured).expanduser()
@@ -51,7 +62,7 @@ def handle(hook_input: HookInput) -> dict[str, Any] | None:
     raw = hook_input.raw
     ctx = ToolUseContext(
         tool_name=str(raw.get("tool_name", "")),
-        tool_input=dict(raw.get("tool_input", {}) or {}),
+        tool_input=MappingProxyType(dict(raw.get("tool_input", {}) or {})),
         cwd=cwd,
         session_id=hook_input.session_id,
         transcript_path=hook_input.transcript_path,

@@ -1,7 +1,8 @@
 """UserPromptSubmit hook — inject [[wikilinks]] into user prompts (opt-in).
 
-Gated on ``memory.enrich_prompts`` (default False). Tokenises the prompt,
-scans ``knowledge/concepts/*.md`` for slug-token or title substring overlap,
+Gated on ``memory.enrich_prompts`` (default False). Tokenises the prompt and
+each concept's slug + frontmatter title, scores by token-set intersection
+(slug overlap weighted 2× since the filename encodes the canonical topic),
 and emits up to three ``[[concepts/<slug>]]`` references as
 ``additionalContext``. Intentionally no LLM call — cheap heuristic only.
 

@@ -113,6 +113,26 @@ def test_discover_skips_files_without_decide(tmp_path: Path) -> None:
     assert names == ["has_decide"]
 
 
+def test_module_registered_in_sys_modules(tmp_path: Path, adjoint_home: Path) -> None:
+    """Policy modules must land in ``sys.modules`` so self-reference works."""
+    import sys
+
+    _write(
+        tmp_path / "registered.py",
+        """
+        import sys
+        from adjoint.policies.types import PolicyDecision
+        # If sys.modules registration is missing, this raises KeyError at import.
+        _ME = sys.modules[__name__]
+        assert _ME is not None
+        def decide(ctx):
+            return PolicyDecision(action="allow")
+        """,
+    )
+    discover_policies(tmp_path)
+    assert "adjoint_policy_registered" in sys.modules
+
+
 def test_discover_supports_sibling_helper_imports(
     tmp_path: Path, adjoint_home: Path, project_dir: Path
 ) -> None:
@@ -209,8 +229,9 @@ def test_run_policies_timeout_is_allow(
     decision = run_policies(_ctx(project_dir), policies, timeout_ms=100)
     elapsed = time.monotonic() - t0
     assert decision.action == "allow"
-    # Deadline is ~100 ms; allow some slack but not 2 s.
-    assert elapsed < 1.0
+    # Lower bound: the timeout must actually wait the budget, not skip it.
+    # Upper bound: but never the full 2 s sleep the policy requested.
+    assert 0.09 <= elapsed < 1.0, f"expected ~100ms wait, got {elapsed:.3f}s"
 
 
 def test_run_policies_exception_is_allow(

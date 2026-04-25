@@ -68,7 +68,16 @@ def discover_policies(policies_dir: Path) -> list[tuple[str, PolicyFn]]:
                     log_event(logger, "policy.import.skip", path=str(path), reason="no-spec")
                     continue
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                # Register before ``exec_module`` so the policy can reference
+                # itself (e.g., dataclasses' ``__module__`` lookup) and so
+                # circular imports between sibling policy files terminate.
+                # Standard pattern from importlib docs.
+                sys.modules[mod_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(mod_name, None)
+                    raise
             except Exception as exc:  # noqa: BLE001 — fail-open on import error
                 log_event(
                     logger,

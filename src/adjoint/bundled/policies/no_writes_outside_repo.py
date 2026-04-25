@@ -11,7 +11,7 @@ from pathlib import Path
 
 from adjoint.policies.types import PolicyDecision, ToolUseContext
 
-_FILE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
+_FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 def decide(ctx: ToolUseContext) -> PolicyDecision:

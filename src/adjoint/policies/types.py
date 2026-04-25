@@ -9,6 +9,7 @@ stable for when the surface expands.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -28,7 +29,10 @@ class PolicyDecision(BaseModel):
 @dataclass(frozen=True)
 class ToolUseContext:
     tool_name: str
-    tool_input: dict[str, Any]
+    # Read-only at the type layer. ``pre_tool_use`` wraps the raw dict in a
+    # ``types.MappingProxyType`` so an earlier policy can't mutate the view a
+    # later one receives.
+    tool_input: Mapping[str, Any]
     cwd: Path
     session_id: str | None
     transcript_path: Path | None

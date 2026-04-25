@@ -25,15 +25,27 @@ _PAYLOAD_STRING_CAP = 256
 
 
 def _summarize_response(tool_response: Any) -> Any:
-    if not isinstance(tool_response, dict):
-        return tool_response
-    out: dict[str, Any] = {}
-    for k, v in tool_response.items():
-        if isinstance(v, str) and len(v) > _PAYLOAD_STRING_CAP:
-            out[f"{k}_len"] = len(v)
-        else:
-            out[k] = v
-    return out
+    """Trim bulky payloads before storing them in events.db.
+
+    Long strings (>_PAYLOAD_STRING_CAP) collapse to ``{"_value_len": N}`` so a
+    multi-megabyte tool stdout doesn't bloat the audit table — the transcript
+    already has the full text. Dict values follow the same rule keyed as
+    ``<k>_len``. Lists are mapped element-wise so list-of-dicts payloads
+    (e.g. Glob results) stay summarised.
+    """
+    if isinstance(tool_response, dict):
+        out: dict[str, Any] = {}
+        for k, v in tool_response.items():
+            if isinstance(v, str) and len(v) > _PAYLOAD_STRING_CAP:
+                out[f"{k}_len"] = len(v)
+            else:
+                out[k] = v
+        return out
+    if isinstance(tool_response, list):
+        return [_summarize_response(item) for item in tool_response]
+    if isinstance(tool_response, str) and len(tool_response) > _PAYLOAD_STRING_CAP:
+        return {"_value_len": len(tool_response)}
+    return tool_response
 
 
 def handle(hook_input: HookInput) -> dict[str, Any] | None:

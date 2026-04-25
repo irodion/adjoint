@@ -89,6 +89,32 @@ def test_post_tool_use_summarizes_long_stdout(
     assert tr["stderr"] == ""
 
 
+def test_summarize_response_handles_str_and_list() -> None:
+    from adjoint.hooks.post_tool_use import _PAYLOAD_STRING_CAP, _summarize_response
+
+    short = "x" * (_PAYLOAD_STRING_CAP // 2)
+    long = "y" * (_PAYLOAD_STRING_CAP * 2)
+
+    # Bare long string → ``{"_value_len": N}``.
+    summarized = _summarize_response(long)
+    assert summarized == {"_value_len": len(long)}
+
+    # Bare short string → unchanged.
+    assert _summarize_response(short) == short
+
+    # List of mixed payloads — recurse element-wise.
+    summarized_list = _summarize_response(
+        [
+            {"path": "a.txt", "preview": long},
+            short,
+            long,
+        ]
+    )
+    assert summarized_list[0] == {"path": "a.txt", "preview_len": len(long)}
+    assert summarized_list[1] == short
+    assert summarized_list[2] == {"_value_len": len(long)}
+
+
 def test_post_tool_use_respects_audit_disabled(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:

@@ -32,6 +32,27 @@ def _payload(project_dir: Path, tool_name: str, tool_input: dict) -> str:
     )
 
 
+def test_resolve_policies_dir_default_honors_adjoint_home(adjoint_home: Path) -> None:
+    """Default config string routes through user_paths(); ADJOINT_HOME is honored."""
+    from adjoint.config import PoliciesConfig
+    from adjoint.hooks.pre_tool_use import _resolve_policies_dir
+    from adjoint.paths import user_paths
+
+    default = PoliciesConfig.model_fields["dir"].default
+    assert _resolve_policies_dir(default) == user_paths().policies_enabled
+    # And user_paths() reflects ADJOINT_HOME (the fixture pinned it to a temp dir).
+    assert str(adjoint_home) in str(_resolve_policies_dir(default))
+
+
+def test_resolve_policies_dir_explicit_override(tmp_path: Path) -> None:
+    """An explicit override is expanduser'd and returned verbatim."""
+    from adjoint.hooks.pre_tool_use import _resolve_policies_dir
+
+    target = tmp_path / "custom-policies"
+    assert _resolve_policies_dir(str(target)) == target
+    assert _resolve_policies_dir("~/some-custom").is_absolute()
+
+
 def test_no_policies_dir_is_passthrough(project_dir: Path, run_hook_bin) -> None:
     cp = run_hook_bin(HOOK_BIN, _payload(project_dir, "Bash", {"command": "ls"}))
     assert cp.returncode == 0
