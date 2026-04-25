@@ -49,8 +49,13 @@ def _resolve_policies_dir(configured: str, project_cwd: Path) -> Path:
     are ``expanduser``'d; relative overrides like ``[policies] dir = "custompol"``
     are anchored against ``project_cwd`` so the lookup doesn't depend on
     whatever directory Claude Code happened to spawn the hook from.
+
+    Comparison is path-based (with whitespace stripped) so pasted variants of
+    the default — trailing slash, surrounding whitespace — still route through
+    ``user_paths()``. A naïve string equality would let those variants bypass
+    ``ADJOINT_HOME`` and resolve against the real OS home instead.
     """
-    if configured == _DEFAULT_DIR:
+    if Path(configured.strip()) == Path(_DEFAULT_DIR):
         return user_paths().policies_enabled
     expanded = Path(configured).expanduser()
     if expanded.is_absolute():

@@ -43,6 +43,23 @@ def test_resolve_policies_dir_default_honors_adjoint_home(adjoint_home: Path) ->
     assert str(adjoint_home) in str(_resolve_policies_dir(default, Path("/tmp")))
 
 
+def test_resolve_policies_dir_default_variants_route_through_user_paths(
+    adjoint_home: Path,
+) -> None:
+    """Trailing slash / whitespace variants of the default still route through
+    user_paths() rather than slipping past the sentinel via expanduser()."""
+    from adjoint.hooks.pre_tool_use import _resolve_policies_dir
+    from adjoint.paths import user_paths
+
+    expected = user_paths().policies_enabled
+    for variant in (
+        "~/.adjoint/policies/enabled/",
+        "  ~/.adjoint/policies/enabled  ",
+        "~/.adjoint/policies/enabled\n",
+    ):
+        assert _resolve_policies_dir(variant, Path("/tmp")) == expected, variant
+
+
 def test_resolve_policies_dir_absolute_override(tmp_path: Path) -> None:
     """Absolute override is expanduser'd and returned verbatim."""
     from adjoint.hooks.pre_tool_use import _resolve_policies_dir
