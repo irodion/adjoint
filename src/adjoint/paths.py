@@ -63,6 +63,13 @@ def find_project_root(start: Path | str) -> Path:
         home = None
     for d in (here, *here.parents):
         if home is not None and d == home:
+            # Don't auto-treat HOME as a project just because the global
+            # ``~/.adjoint`` / ``~/.claude`` exist after install. But honor
+            # an explicit ``.git`` at HOME — a dotfiles repo rooted at ~ is
+            # a real project, and missing it would silently break config /
+            # policies / audit / enrichment for any subdirectory session.
+            if (d / ".git").exists():
+                return d
             break
         if any((d / m).exists() for m in _PROJECT_ROOT_MARKERS):
             return d

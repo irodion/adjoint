@@ -64,6 +64,35 @@ def test_post_tool_use_writes_event_row(
     assert row["payload"]["duration_ms"] == 42
 
 
+def test_post_tool_use_strips_short_response_secrets(
+    adjoint_home: Path, project_dir: Path, run_hook_bin
+) -> None:
+    """Short stdout / stderr from commands like ``echo $TOKEN`` or
+    ``gh auth token`` is exactly the kind of secret we mustn't persist —
+    and at well under 256 chars, the length-only check missed it."""
+    _install(project_dir)
+    secret = "sk-abc12345"
+    stdin = json.dumps(
+        {
+            "session_id": "s",
+            "cwd": str(project_dir),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo $OPENAI_API_KEY"},
+            "tool_response": {"exit_code": 0, "stdout": secret, "stderr": ""},
+        }
+    )
+    cp = run_hook_bin("adjoint-hook-post-tool-use", stdin)
+    assert cp.returncode == 0
+    rows = _fetch_events()
+    tr = rows[0]["payload"]["tool_response"]
+    assert "stdout" not in tr, "short stdout must not be stored verbatim"
+    assert tr.get("stdout_len") == len(secret)
+    # Empty stderr stays as "" — ``stderr_len: 0`` is just noise.
+    assert tr["stderr"] == ""
+    assert tr["exit_code"] == 0
+
+
 def test_post_tool_use_strips_short_body_fields(
     adjoint_home: Path, project_dir: Path, run_hook_bin
 ) -> None:

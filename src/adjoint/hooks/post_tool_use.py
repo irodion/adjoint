@@ -24,12 +24,26 @@ from ._runtime import HookInput, run_hook
 
 _PAYLOAD_STRING_CAP = 256
 
-# Field names whose values are user-edited bodies — always replaced with a
-# length summary regardless of size. A one-line ``.env`` secret or short
-# token is exactly the kind of tool input we don't want in the audit DB,
-# even though it falls under ``_PAYLOAD_STRING_CAP``. Covers Write / Edit /
-# MultiEdit / NotebookEdit shapes and Read responses.
-_BODY_FIELDS = frozenset({"content", "old_string", "new_string", "old_source", "new_source"})
+# Field names whose values are bodies / outputs — always replaced with a
+# length summary regardless of size. A one-line ``.env`` secret, an API
+# token returned by ``gh auth token``, or the output of ``echo $SECRET`` is
+# exactly the kind of payload we don't want in the audit DB, even though it
+# falls under ``_PAYLOAD_STRING_CAP``. Covers:
+#   - Write / Edit / MultiEdit / NotebookEdit inputs (content, old_string, …)
+#   - Read response bodies (content)
+#   - Bash / shell-style response outputs (stdout, stderr, output)
+_BODY_FIELDS = frozenset(
+    {
+        "content",
+        "old_string",
+        "new_string",
+        "old_source",
+        "new_source",
+        "stdout",
+        "stderr",
+        "output",
+    }
+)
 
 # Audit writes need to fail fast if the DB is contended, not stall past the
 # hook's 0.5 s deadline. If another adjoint process holds a lock, dropping
@@ -54,7 +68,10 @@ def _summarize_response(tool_response: Any) -> Any:
     if isinstance(tool_response, dict):
         out: dict[str, Any] = {}
         for k, v in tool_response.items():
-            if isinstance(v, str) and (k in _BODY_FIELDS or len(v) > _PAYLOAD_STRING_CAP):
+            # Empty strings (e.g. ``stderr: ""`` on success) skip the strip:
+            # ``stderr_len: 0`` is just noise, and there's no privacy concern
+            # in keeping the empty string.
+            if isinstance(v, str) and v and (k in _BODY_FIELDS or len(v) > _PAYLOAD_STRING_CAP):
                 out[f"{k}_len"] = len(v)
             elif isinstance(v, (dict, list)):
                 out[k] = _summarize_response(v)
